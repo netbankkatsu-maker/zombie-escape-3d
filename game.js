@@ -55,6 +55,7 @@
   let nearContainer = null, nearWeaponItem = null;
   let meleeCD = 0, gunCD = 0, healCD = 0;
   let overlayAction = 'start'; // 'start' | 'menu'
+  let exhaustedNotified = false; // FIX: module-level var instead of DOM property
 
   const keys = {}, prevKeys = {};
   let joy  = { on:false, id:-1, bx:0, by:0, dx:0, dy:0 };
@@ -208,14 +209,22 @@
     player.hp=HP_MAX; player.stamina=ST_MAX; player.exhausted=false;
     player.melee={...MELEE.fists,id:'fists'}; player.gun=null; player.heals=0;
     meleeCD=0; gunCD=0; healCD=0; nearContainer=null; nearWeaponItem=null;
+    exhaustedNotified=false;
 
     const g=new THREE.Group();
     const legM=new THREE.MeshLambertMaterial({color:0x223366});
     [-0.14,0.14].forEach(ox=>{const l=new THREE.Mesh(new THREE.BoxGeometry(0.2,0.55,0.2),legM);l.position.set(ox,0.275,0);g.add(l);});
-    g.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(0.52,0.62,0.28),new THREE.MeshLambertMaterial({color:0x3a6abf})),{position:new THREE.Vector3(0,0.83,0)}));
+
+    // FIX: use .position.set() instead of Object.assign
+    const torso=new THREE.Mesh(new THREE.BoxGeometry(0.52,0.62,0.28),new THREE.MeshLambertMaterial({color:0x3a6abf}));
+    torso.position.set(0,0.83,0); g.add(torso);
+
     const armM=new THREE.MeshLambertMaterial({color:0x3a6abf});
     [-0.38,0.38].forEach(ox=>{const a=new THREE.Mesh(new THREE.BoxGeometry(0.18,0.52,0.18),armM);a.position.set(ox,0.75,0);g.add(a);});
-    g.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(0.44,0.44,0.44),new THREE.MeshLambertMaterial({color:0xffcc99})),{position:new THREE.Vector3(0,1.38,0)}));
+
+    const head=new THREE.Mesh(new THREE.BoxGeometry(0.44,0.44,0.44),new THREE.MeshLambertMaterial({color:0xffcc99}));
+    head.position.set(0,1.38,0); g.add(head);
+
     player.mesh=g; g.position.set(player.x,0,player.z); scene.add(g);
     camera.position.set(player.x,CAM_H,player.z+CAM_DIST); camera.lookAt(player.x,1,player.z);
   }
@@ -258,11 +267,10 @@
     let w=0.32,h=0.28,d=0.28;
     if(type==='melee'){w=0.12;h=0.62;d=0.12;}
     if(type==='gun'){w=0.42;h=0.2;d=0.18;}
-    // Cross on bandage
     if(type==='heal'&&sub==='bandage'){
       const rM=new THREE.MeshLambertMaterial({color:0xff2222});
-      g.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(0.08,0.28,0.08),rM),{}));
-      g.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(0.28,0.08,0.08),rM),{}));
+      const v=new THREE.Mesh(new THREE.BoxGeometry(0.08,0.28,0.08),rM); g.add(v);
+      const hz=new THREE.Mesh(new THREE.BoxGeometry(0.28,0.08,0.08),rM); g.add(hz);
     }
     const box=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),new THREE.MeshLambertMaterial({color,emissive:color,emissiveIntensity:0.15}));
     g.add(box);
@@ -363,7 +371,8 @@
   }
 
   function showResult(title,msg){
-    state=state; overlayAction='menu';
+    // FIX: removed no-op `state=state` — state is already set by winGame/gameOver
+    overlayAction='menu';
     $oTitle.textContent=title;
     $oBody.innerHTML=`<p style="font-size:15px;line-height:1.8;color:rgba(255,255,255,0.85)">${msg}</p>`;
     $oBtn.textContent='メニューへ';
@@ -378,8 +387,11 @@
     window.addEventListener('keydown',e=>{keys[e.code]=true;});
     window.addEventListener('keyup',e=>{keys[e.code]=false;});
 
-    // Pointer lock for desktop
-    document.addEventListener('click',()=>{ if(state==='playing') renderer.domElement.requestPointerLock?.(); });
+    // FIX: pointer lock only on canvas click, not every document click
+    // This prevents requestPointerLock() from firing on the start button
+    renderer.domElement.addEventListener('click',()=>{
+      try { renderer.domElement.requestPointerLock?.(); } catch(_) {}
+    });
     document.addEventListener('pointerlockchange',()=>{
       if(document.pointerLockElement===renderer.domElement) document.addEventListener('mousemove',onMM);
       else document.removeEventListener('mousemove',onMM);
@@ -451,18 +463,19 @@
   //  COMBAT
   // ================================================================
   function doMelee(){
+    // FIX: guard against non-playing state
+    if(state!=='playing')return;
     if(meleeCD>0)return;
     if(player.exhausted&&player.melee.id!=='fists')return;
     if(player.stamina<player.melee.st&&player.melee.id!=='fists'){notify('スタミナ不足！');return;}
     player.stamina=Math.max(0,player.stamina-player.melee.st);
     meleeCD=player.melee.cd;
-    let hit=false;
     for(let i=zombies.length-1;i>=0;i--){
       const z=zombies[i];
       const d=dist2(player.x,player.z,z.x,z.z);
       if(d>player.melee.range)continue;
       if(Math.abs(angleDiff(Math.atan2(z.x-player.x,z.z-player.z),player.angle))>player.melee.arc/2)continue;
-      z.hp-=player.melee.dmg; z.flashTimer=0.18; hit=true;
+      z.hp-=player.melee.dmg; z.flashTimer=0.18;
       if(z.hp<=0)killZombie(i);
     }
     flashMuzzle('rgba(255,200,50,0.3)',120);
@@ -470,6 +483,8 @@
   }
 
   function doShoot(){
+    // FIX: guard against non-playing state
+    if(state!=='playing')return;
     if(!player.gun||gunCD>0)return;
     if(player.gun.ammo<=0){notify('弾切れ！');return;}
     player.gun.ammo--; gunCD=GUNS[player.gun.id].fireCd;
@@ -498,6 +513,8 @@
   }
 
   function doHeal(){
+    // FIX: guard against non-playing state
+    if(state!=='playing')return;
     if(player.heals<=0||healCD>0)return;
     if(player.hp>=HP_MAX){notify('HPは満タン！');return;}
     player.heals--; healCD=1.5;
@@ -519,11 +536,17 @@
   //  INTERACT / PICKUP
   // ================================================================
   function doInteract(){
+    // FIX: guard against non-playing state
+    if(state!=='playing')return;
     if(nearContainer&&!nearContainer.opened)openContainer(nearContainer);
   }
   function openContainer(c){
     c.opened=true;
-    c.mesh.children.forEach(ch=>{if(ch.material&&!ch.material.wireframe)ch.material.color.multiplyScalar(0.45);});
+    // FIX: skip wireframe materials reliably by checking ch.isMesh and !wireframe
+    c.mesh.traverse(ch=>{
+      if(ch.isMesh&&ch.material&&!ch.material.wireframe)
+        ch.material.color.multiplyScalar(0.45);
+    });
     const loot=rollCrate(c.type);
     loot.forEach(itm=>{
       const ox=(Math.random()-0.5)*CELL*0.55,oz=(Math.random()-0.5)*CELL*0.55;
@@ -666,7 +689,8 @@
       if(z.flashTimer>0){
         z.flashTimer-=dt;
         const ei=z.flashTimer>0?0.8:0;
-        z.mesh.traverse(c=>{if(c.isMesh&&c.material.emissive){c.material.emissive.setHex(z.flashTimer>0?0xff0000:0x000000);c.material.emissiveIntensity=ei;}});
+        // FIX: added c.material&& null check before accessing emissive
+        z.mesh.traverse(c=>{if(c.isMesh&&c.material&&c.material.emissive){c.material.emissive.setHex(z.flashTimer>0?0xff0000:0x000000);c.material.emissiveIntensity=ei;}});
       }
       const dx=player.x-z.x,dz=player.z-z.z,d=Math.sqrt(dx*dx+dz*dz)||0.001;
       if(d<D.zDet){
@@ -702,8 +726,9 @@
     const st=player.stamina/ST_MAX*100;
     $stFill.style.width=st+'%'; $stFill.style.background=player.exhausted?'#666':st>40?'#00bbff':'#ff8800';
     $stNum.textContent=Math.ceil(player.stamina);
-    if(player.exhausted&&!$stNum._warned){notify('スタミナ切れ！');$stNum._warned=true;}
-    if(!player.exhausted)$stNum._warned=false;
+    // FIX: use module-level exhaustedNotified instead of DOM property
+    if(player.exhausted&&!exhaustedNotified){notify('スタミナ切れ！');exhaustedNotified=true;}
+    if(!player.exhausted)exhaustedNotified=false;
 
     $weaponInfo.textContent=`⚔ ${player.melee.name}`;
     $weaponInfo.className='';
@@ -711,8 +736,8 @@
     if(player.gun){
       const g=GUNS[player.gun.id];
       $gunInfo.textContent=`🔫 ${g.name} ${player.gun.ammo}/${g.maxAmmo}`;
-      $gunInfo.className=player.gun.ammo>0?'':'';
       $gunInfo.style.color=player.gun.ammo>0?'#ffdd88':'#ff4444';
+      $gunInfo.className='';
     } else { $gunInfo.textContent='🔫 なし'; $gunInfo.style.color=''; $gunInfo.className='dim'; }
 
     $healCount.textContent=`💊 ×${player.heals}`;
