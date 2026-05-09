@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ゾンビ3D">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#05050f">
+  <link rel="manifest" href="./manifest.json">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <title>ゾンビ脱出3D</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+  <!-- Three.js canvas -->
+  <div id="game-canvas"></div>
+
+  <!-- Overlays -->
+  <div id="damage-flash"></div>
+  <div id="muzzle-flash"></div>
+
+  <!-- HUD -->
+  <div id="hud">
+    <div id="hud-bars">
+      <div class="bar-row">
+        <span class="bar-lbl" style="color:#ff4444">❤</span>
+        <div class="bar-wrap"><div id="hp-fill" class="bar-fill"></div></div>
+        <span id="hp-num" class="bar-num">100</span>
+      </div>
+      <div class="bar-row">
+        <span class="bar-lbl" style="color:#44aaff">⚡</span>
+        <div class="bar-wrap"><div id="st-fill" class="bar-fill" style="background:#00bbff"></div></div>
+        <span id="st-num" class="bar-num">100</span>
+      </div>
+    </div>
+    <div id="hud-items">
+      <span id="weapon-info">⚔ 素手</span>
+      <span id="gun-info" class="dim">🔫 なし</span>
+      <span id="heal-count" class="dim">💊 ×0</span>
+    </div>
+    <div id="exit-hint">🟢 出口を目指せ！</div>
+    <!-- PC hint -->
+    <div id="kb-hint">[Space]ATK &nbsp; [F]FIRE &nbsp; [R]HEAL &nbsp; [E]OPEN &nbsp; [Shift]走る</div>
+  </div>
+
+  <!-- Pickup toast -->
+  <div id="pickup-notif"></div>
+
+  <!-- Interact prompt (near container) -->
+  <div id="interact-prompt">📦 <b>OPEN</b> をタップ / <kbd>E</kbd></div>
+
+  <!-- Weapon swap modal -->
+  <div id="swap-prompt">
+    <p id="swap-text"></p>
+    <div class="swap-row">
+      <button id="btn-swap-yes">交換する</button>
+      <button id="btn-swap-no">そのまま</button>
+    </div>
+  </div>
+
+  <!-- Action buttons (bottom right) -->
+  <div id="action-buttons">
+    <button id="btn-interact" class="abtn interact-abtn" style="display:none">📦<br><small>OPEN</small></button>
+    <button id="btn-heal" class="abtn">💊<br><small>HEAL</small></button>
+    <button id="btn-fire" class="abtn">🔫<br><small>FIRE</small></button>
+    <button id="btn-attack" class="abtn atk-abtn">⚔️<br><small>ATK</small></button>
+  </div>
+
+  <!-- Start / Win / GameOver overlay -->
+  <div id="overlay">
+    <h1 id="overlay-title">🧟 ZOMBIE ESCAPE</h1>
+    <div id="overlay-body"></div>
+    <button id="overlay-btn">GAME START</button>
+  </div>
+
+  <!-- Virtual joystick -->
+  <div id="joystick"><div id="joy-knob"></div></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+  <script src="./game.js"></script>
+</body>
+</html>
