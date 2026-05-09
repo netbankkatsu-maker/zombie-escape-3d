@@ -363,11 +363,16 @@
   }
 
   function startGame(){
-    D=DIFFS[currentDiff]; buildGrid(); buildScene();
-    state='playing';
-    $overlay.style.display='none'; $hud.style.display='block';
-    document.getElementById('action-buttons').style.display='flex';
-    updateHUD();
+    try {
+      D=DIFFS[currentDiff]; buildGrid(); buildScene();
+      state='playing';
+      $overlay.style.display='none'; $hud.style.display='block';
+      document.getElementById('action-buttons').style.display='flex';
+      updateHUD();
+    } catch(err) {
+      $oTitle.textContent='エラー発生';
+      $oBody.innerHTML=`<pre style="font-size:11px;color:#f88;white-space:pre-wrap;text-align:left">${err.message}\n${err.stack||''}</pre>`;
+    }
   }
 
   function showResult(title,msg){
