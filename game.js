@@ -6,10 +6,32 @@
   // ================================================================
   const CELL = 4, COLS = 15, ROWS = 15, WALL_H = 3.6;
   const PLAYER_R = 0.45, ZOMBIE_R = 0.45;
-  const EXIT_R = 1.8, PICKUP_R = 1.1, INTERACT_R = 2.2, SAFE_R = 3.0;
+  const EXIT_R = 1.8, INTERACT_R = 2.2;
+  const PICKUP_R = 2.5;   // radius to see nearby items in panel
   const CAM_DIST = 7.5, CAM_H = 5.8, CAM_LERP = 0.09;
   const ST_REGEN = 14, ST_SPRINT = 24, ST_THRESH = 18;
   const WALK_SPD = 5.0, SPRINT_SPD = 7.8;
+
+  // Inventory
+  const INV_ROWS = 4, INV_COLS = 4;
+  const ITEM_SIZES = {
+    bat:{w:1,h:2}, pipe:{w:1,h:2}, axe:{w:1,h:2},
+    pistol:{w:2,h:1}, shotgun:{w:2,h:1},
+    bandage:{w:1,h:1}, medkit:{w:1,h:1},
+    pistol_ammo:{w:1,h:1}, shotgun_ammo:{w:1,h:1}, parts:{w:1,h:1},
+  };
+  const ITEM_ICONS = {
+    bat:'🏏', pipe:'🔩', axe:'🪓',
+    pistol:'🔫', shotgun:'💥',
+    bandage:'🩹', medkit:'💊',
+    pistol_ammo:'🔴', shotgun_ammo:'🟠', parts:'⚙️',
+  };
+  const ITEM_NAMES = {
+    bat:'バット', pipe:'パイプ', axe:'斧',
+    pistol:'ピストル', shotgun:'ショットガン',
+    bandage:'包帯', medkit:'医療キット',
+    pistol_ammo:'ピストル弾', shotgun_ammo:'SG弾', parts:'資材',
+  };
 
   // ================================================================
   //  DIFFICULTY
@@ -38,7 +60,7 @@
   // ================================================================
   //  UPGRADE SYSTEM  (permanent – persists across deaths)
   // ================================================================
-  const SAVE_KEY  = 'zombie-escape-run-v2';
+  const SAVE_KEY  = 'zombie-escape-run-v3';
   const UPG_KEY   = 'zombie-escape-upgrades-v1';
 
   let upgrades = { hpUp:0, stUp:0, meleeDmg:0, gunDmg:0, speed:0 };
@@ -135,22 +157,29 @@
   // Misc timers
   let saveTimer = 5, respawnTO = null;
   let swingTimer = 0, swingMesh = null;
-  let nearSafehouse = false;
 
   const player = {
     x:0, z:0, angle:0, mesh:null,
     hp:100, stamina:100, exhausted:false,
     melee:{...MELEE.fists,id:'fists'},
-    gun:null, heals:0, parts:0,
+    gun:null,
   };
 
+  // ── Inventory ──
+  let invGrid = [];    // INV_ROWS × INV_COLS, null or item.id
+  let invItems = [];   // {id, type, sub, amount, ammo, row, col, w, h}
+  let invNextId = 0;
+  let nearbyWorldItems = [];
+  let invOpen = false;
+  let invCtxId = null;
+
   let zombies = [], worldItems = [], containers = [];
-  let nearContainer = null, nearWeaponItem = null;
+  let nearContainer = null;
   let meleeCD = 0, gunCD = 0, healCD = 0;
   let overlayAction = 'start';
   let exhaustedNotified = false;
 
-  let cameraAngle = 0; // camera orbit angle (swipe / mouse)
+  let cameraAngle = 0;
 
   const keys = {}, prevKeys = {};
   let joy  = {on:false,id:-1,bx:0,by:0,dx:0,dy:0};
@@ -160,8 +189,8 @@
   let $weaponInfo,$gunInfo,$healCount,$exitHint,$timerNum,$killNum,$partsNum;
   let $overlay,$oTitle,$oBody,$oBtn;
   let $joy,$knob,$flash;
-  let $interactPrompt,$pickupNotif,$swapPrompt,$swapText;
-  let $upgradeModal;
+  let $interactPrompt,$pickupNotif,$upgradeModal;
+  let $nearbyPanel,$invOverlay;
 
   // ================================================================
   //  SAVE / LOAD RUN
@@ -170,17 +199,17 @@
     if(state!=='playing') return;
     try {
       localStorage.setItem(SAVE_KEY, JSON.stringify({
-        ver:2, diff:currentDiff, kills:killCount, elapsed:gameElapsed,
+        ver:3, diff:currentDiff, kills:killCount, elapsed:gameElapsed,
         player:{x:player.x,z:player.z,angle:player.angle,
                 hp:player.hp,stamina:player.stamina,
                 meleeId:player.melee.id,
                 gunId:player.gun?player.gun.id:null,
-                gunAmmo:player.gun?player.gun.ammo:0,
-                heals:player.heals, parts:player.parts},
+                gunAmmo:player.gun?player.gun.ammo:0},
         grid,
         zombies:zombies.map(z=>({x:z.x,z:z.z,hp:z.hp,maxHp:z.maxHp,angle:z.angle})),
         containers:containers.map(c=>({type:c.type,x:c.x,z:c.z,opened:c.opened})),
         items:worldItems.map(i=>({type:i.type,sub:i.sub,amount:i.amount,ammo:i.ammo,x:i.x,z:i.z})),
+        inventory:invItems.map(i=>({...i})),
       }));
     } catch(_){}
   }
@@ -211,12 +240,12 @@
     $flash    = document.getElementById('damage-flash');
     $interactPrompt = document.getElementById('interact-prompt');
     $pickupNotif    = document.getElementById('pickup-notif');
-    $swapPrompt     = document.getElementById('swap-prompt');
-    $swapText       = document.getElementById('swap-text');
     $timerNum       = document.getElementById('timer-num');
     $killNum        = document.getElementById('kill-num');
     $partsNum       = document.getElementById('parts-num');
     $upgradeModal   = document.getElementById('upgrade-modal');
+    $nearbyPanel    = document.getElementById('nearby-panel');
+    $invOverlay     = document.getElementById('inv-overlay');
 
     loadUpgrades();
     initRenderer();
@@ -406,11 +435,12 @@
   function spawnPlayer(){
     const ps=gw(1,1); player.x=ps.x; player.z=ps.z; player.angle=0;
     player.hp=eff.hpMax(); player.stamina=eff.stMax(); player.exhausted=false;
-    player.melee={...MELEE.fists,id:'fists'}; player.gun=null; player.heals=0; player.parts=0;
-    meleeCD=0; gunCD=0; healCD=0; nearContainer=null; nearWeaponItem=null;
-    exhaustedNotified=false; nearSafehouse=false;
+    player.melee={...MELEE.fists,id:'fists'}; player.gun=null;
+    meleeCD=0; gunCD=0; healCD=0; nearContainer=null;
+    exhaustedNotified=false;
     killCount=0; gameStartTime=performance.now(); gameElapsed=0;
     cameraAngle=0;
+    invInit();
 
     let g;
     if(MODELS.player){
@@ -431,13 +461,10 @@
   }
 
   function restorePlayer(data){
-    // Restore player state from save (mesh already created by spawnPlayer)
     player.x=data.x; player.z=data.z; player.angle=data.angle;
     player.hp=data.hp; player.stamina=data.stamina;
     player.melee = data.meleeId&&MELEE[data.meleeId]?{...MELEE[data.meleeId],id:data.meleeId}:{...MELEE.fists,id:'fists'};
     player.gun   = data.gunId&&GUNS[data.gunId]?{...GUNS[data.gunId],id:data.gunId,ammo:data.gunAmmo}:null;
-    player.heals = data.heals||0;
-    player.parts = data.parts||0;
     player.mesh.position.set(player.x,0,player.z);
     player.mesh.rotation.y=player.angle;
   }
@@ -477,8 +504,8 @@
                     hp:D.zHp,maxHp:D.zHp,mesh,
                     wTimer:Math.random()*3,wDir:Math.random()*Math.PI*2,
                     lastDmg:0,flashTimer:0,
-                    attackAnim:0, // lunge timer
-                    baseX:wp.x,baseZ:wp.z}); // for lunge reset
+                    attackAnim:0,
+                    baseX:wp.x,baseZ:wp.z});
     }
   }
 
@@ -494,7 +521,7 @@
   }
 
   // ================================================================
-  //  ITEMS  (always use fast colored boxes — no model cloning = no freeze)
+  //  ITEMS  (always use fast colored boxes)
   // ================================================================
   const ITEM_COLOR = {
     heal_bandage:0xffffff, heal_medkit:0x22cc55,
@@ -520,7 +547,6 @@
       g.add(new THREE.Mesh(new THREE.BoxGeometry(0.08,0.28,0.08),rM));
       g.add(new THREE.Mesh(new THREE.BoxGeometry(0.28,0.08,0.08),rM));
     } else if(type==='parts'){
-      // Gear-like shape: box + rotated box
       const pM=new THREE.MeshLambertMaterial({color:col,emissive:col,emissiveIntensity:0.2});
       g.add(new THREE.Mesh(new THREE.BoxGeometry(0.28,0.12,0.28),pM));
       const r2=new THREE.Mesh(new THREE.BoxGeometry(0.12,0.28,0.12),pM); r2.rotation.y=Math.PI/4; g.add(r2);
@@ -545,8 +571,8 @@
 
   function rollGround(){
     const r=Math.random();
-    if(r<0.25)return{type:'heal',sub:'bandage',amount:30};
-    if(r<0.38)return{type:'heal',sub:'medkit',amount:55};
+    if(r<0.25)return{type:'heal',sub:'bandage',amount:1};
+    if(r<0.38)return{type:'heal',sub:'medkit',amount:1};
     if(r<0.48)return{type:'ammo',sub:'pistol_ammo',amount:5+Math.floor(Math.random()*10)};
     if(r<0.54)return{type:'ammo',sub:'shotgun_ammo',amount:1+Math.floor(Math.random()*3)};
     if(r<0.65)return{type:'melee',sub:randomMeleeSub()};
@@ -560,8 +586,8 @@
     for(let i=0;i<slots;i++){
       if(Math.random()<0.12)continue;
       const r=Math.random();
-      if(r<0.22)items.push({type:'heal',sub:'bandage',amount:30});
-      else if(r<0.38)items.push({type:'heal',sub:'medkit',amount:55});
+      if(r<0.22)items.push({type:'heal',sub:'bandage',amount:1});
+      else if(r<0.38)items.push({type:'heal',sub:'medkit',amount:1});
       else if(r<0.52)items.push({type:'ammo',sub:'pistol_ammo',amount:5+Math.floor(Math.random()*12)});
       else if(r<0.58)items.push({type:'ammo',sub:'shotgun_ammo',amount:1+Math.floor(Math.random()*4)});
       else if(r<0.70)items.push({type:'melee',sub:randomMeleeSub()});
@@ -618,17 +644,354 @@
   }
 
   // ================================================================
+  //  INVENTORY SYSTEM
+  // ================================================================
+  function invInit(){
+    invGrid=[];
+    for(let r=0;r<INV_ROWS;r++){invGrid[r]=[];for(let c=0;c<INV_COLS;c++)invGrid[r][c]=null;}
+    invItems=[]; invNextId=0; invCtxId=null;
+    if(invOpen)renderInvUI();
+  }
+
+  function invGetItem(id){ return invItems.find(i=>i.id===id)||null; }
+
+  function invCountType(type,sub){
+    return invItems.filter(i=>i.type===type&&(!sub||i.sub===sub)).reduce((s,i)=>s+(i.amount||1),0);
+  }
+
+  function invCanPlace(row,col,w,h,excludeId=null){
+    if(row<0||col<0||row+h>INV_ROWS||col+w>INV_COLS)return false;
+    for(let r=row;r<row+h;r++)
+      for(let c=col;c<col+w;c++)
+        if(invGrid[r][c]!==null&&invGrid[r][c]!==excludeId)return false;
+    return true;
+  }
+
+  function invFindSlot(w,h){
+    for(let r=0;r<=INV_ROWS-h;r++)
+      for(let c=0;c<=INV_COLS-w;c++)
+        if(invCanPlace(r,c,w,h))return{row:r,col:c};
+    return null;
+  }
+
+  function invPlaceItem(item){
+    for(let r=item.row;r<item.row+item.h;r++)
+      for(let c=item.col;c<item.col+item.w;c++)
+        invGrid[r][c]=item.id;
+  }
+
+  function invClearItem(item){
+    for(let r=0;r<INV_ROWS;r++)
+      for(let c=0;c<INV_COLS;c++)
+        if(invGrid[r][c]===item.id)invGrid[r][c]=null;
+  }
+
+  // Returns true if successfully added to inventory
+  function invAdd(type,sub,amount,ammo){
+    // Stackable consumables: merge into existing stack
+    if(type==='heal'||type==='ammo'||type==='parts'){
+      const existing=invItems.find(i=>i.type===type&&i.sub===sub);
+      if(existing){existing.amount+=(amount||1);if(invOpen)renderInvUI();return true;}
+    }
+    const sz=ITEM_SIZES[sub]||{w:1,h:1};
+    const slot=invFindSlot(sz.w,sz.h);
+    if(!slot)return false; // No room
+    const item={id:invNextId++,type,sub,amount:amount||1,ammo:ammo||0,
+                row:slot.row,col:slot.col,w:sz.w,h:sz.h};
+    invItems.push(item);
+    invPlaceItem(item);
+    if(invOpen)renderInvUI();
+    return true;
+  }
+
+  function invRemove(id){
+    const item=invGetItem(id);
+    if(!item)return null;
+    invClearItem(item);
+    invItems=invItems.filter(i=>i.id!==id);
+    if(invCtxId===id)invCtxId=null;
+    if(invOpen)renderInvUI();
+    return item;
+  }
+
+  // Drop inventory item to ground near player
+  function invDrop(id){
+    const item=invRemove(id);
+    if(!item)return;
+    const ox=(Math.random()-0.5)*2.0, oz=(Math.random()-0.5)*2.0;
+    createItem(item.type,item.sub,item.amount,item.ammo,player.x+ox,player.z+oz);
+    notify(`${ITEM_ICONS[item.sub]||'📦'} ${ITEM_NAMES[item.sub]||item.sub}を捨てた`);
+    updateHUD();
+  }
+
+  // Equip weapon from inventory
+  function invEquip(id){
+    const item=invGetItem(id);
+    if(!item)return;
+    if(item.type==='melee'){
+      const prev=player.melee;
+      invRemove(id);
+      if(prev.id!=='fists') invAdd('melee',prev.id,1,0);
+      player.melee={...MELEE[item.sub],id:item.sub};
+      notify(`⚔ ${MELEE[item.sub].name}を装備！`);
+    } else if(item.type==='gun'){
+      const prev=player.gun;
+      invRemove(id);
+      if(prev) invAdd('gun',prev.id,1,prev.ammo);
+      player.gun={...GUNS[item.sub],id:item.sub,ammo:item.ammo};
+      notify(`🔫 ${GUNS[item.sub].name}を装備！`);
+    }
+    SFX.pickup(); updateHUD(); if(invOpen)renderInvUI();
+  }
+
+  // Use consumable from inventory
+  function invUse(id){
+    const item=invGetItem(id);
+    if(!item)return;
+    if(item.type==='heal'){
+      if(player.hp>=eff.hpMax()){notify('HPは満タン！');return;}
+      healCD=1.5;
+      const healAmt=item.sub==='medkit'?55:30;
+      player.hp=Math.min(eff.hpMax(),player.hp+healAmt);
+      item.amount--;
+      if(item.amount<=0)invRemove(id);
+      SFX.heal(); notify(`💊 HP +${healAmt} 回復`);
+      updateHUD(); if(invOpen)renderInvUI();
+    } else if(item.type==='ammo'){
+      if(!player.gun){notify('銃がない！');return;}
+      const gunSub=item.sub.replace('_ammo','');
+      if(player.gun.id!==gunSub){notify('弾の種類が違う！');return;}
+      const max=GUNS[player.gun.id].maxAmmo;
+      const add=Math.min(item.amount,max-player.gun.ammo);
+      if(add<=0){notify('弾は満タン！');return;}
+      player.gun.ammo+=add; item.amount-=add;
+      if(item.amount<=0)invRemove(id);
+      notify(`🔫 弾薬 +${add}（残弾:${player.gun.ammo}）`);
+      SFX.pickup(); updateHUD(); if(invOpen)renderInvUI();
+    }
+  }
+
+  // Deduct parts from inventory (returns true if successful)
+  function invDeductParts(amount){
+    let rem=amount;
+    for(const it of [...invItems].filter(i=>i.type==='parts')){
+      if(rem<=0)break;
+      const use=Math.min(it.amount,rem);
+      it.amount-=use; rem-=use;
+      if(it.amount<=0)invRemove(it.id);
+    }
+    return rem===0;
+  }
+
+  // ── Pickup world item into inventory ──
+  function pickupWorldItem(worldItem){
+    if(worldItem.collected)return;
+    worldItem.collected=true;
+    scene.remove(worldItem.mesh);
+    worldItems=worldItems.filter(i=>!i.collected);
+
+    const icon=ITEM_ICONS[worldItem.sub]||'📦';
+    const name=ITEM_NAMES[worldItem.sub]||worldItem.sub;
+
+    if(worldItem.type==='ammo'){
+      // If matching gun equipped, fill ammo directly first
+      if(player.gun&&player.gun.id===worldItem.sub.replace('_ammo','')){
+        const max=GUNS[player.gun.id].maxAmmo;
+        const add=Math.min(worldItem.amount,max-player.gun.ammo);
+        if(add>0){
+          player.gun.ammo+=add;
+          const rem=worldItem.amount-add;
+          if(rem>0)invAdd('ammo',worldItem.sub,rem,0);
+          notify(`${icon} 弾薬 +${add}`);
+          SFX.pickup(); updateHUD(); return;
+        }
+      }
+      if(!invAdd('ammo',worldItem.sub,worldItem.amount,0))
+        notify('インベントリがいっぱい！');
+      else { SFX.pickup(); notify(`${icon} ${name} ×${worldItem.amount}`); }
+
+    } else if(worldItem.type==='heal'){
+      if(!invAdd('heal',worldItem.sub,1,0))
+        notify('インベントリがいっぱい！');
+      else { SFX.pickup(); notify(`${icon} ${name}`); }
+
+    } else if(worldItem.type==='parts'){
+      if(!invAdd('parts','parts',worldItem.amount,0))
+        notify('インベントリがいっぱい！');
+      else { SFX.pickup(); notify(`⚙️ 資材 +${worldItem.amount}`); }
+
+    } else if(worldItem.type==='melee'){
+      // Auto-equip if using fists, else bag it
+      if(player.melee.id==='fists'){
+        player.melee={...MELEE[worldItem.sub],id:worldItem.sub};
+        SFX.pickup(); notify(`⚔ ${MELEE[worldItem.sub].name}を装備！`);
+      } else {
+        if(!invAdd('melee',worldItem.sub,1,0))
+          notify('インベントリがいっぱい！');
+        else { SFX.pickup(); notify(`${icon} ${name}をバッグに入れた`); }
+      }
+
+    } else if(worldItem.type==='gun'){
+      // Auto-equip if no gun, else bag it
+      if(!player.gun){
+        player.gun={...GUNS[worldItem.sub],id:worldItem.sub,ammo:worldItem.ammo};
+        SFX.pickup(); notify(`🔫 ${GUNS[worldItem.sub].name}を装備！`);
+      } else {
+        if(!invAdd('gun',worldItem.sub,1,worldItem.ammo))
+          notify('インベントリがいっぱい！');
+        else { SFX.pickup(); notify(`${icon} ${name}をバッグに入れた`); }
+      }
+    }
+    updateHUD();
+  }
+
+  // ── Nearby items panel ──
+  function renderNearbyPanel(){
+    if(!$nearbyPanel)return;
+    if(invOpen){ $nearbyPanel.style.display='none'; return; }
+
+    nearbyWorldItems=worldItems.filter(it=>!it.collected&&dist2(player.x,player.z,it.x,it.z)<PICKUP_R);
+
+    if(nearbyWorldItems.length===0){
+      $nearbyPanel.style.display='none'; return;
+    }
+    $nearbyPanel.style.display='block';
+    $nearbyPanel.innerHTML=nearbyWorldItems.map((it,i)=>{
+      const icon=ITEM_ICONS[it.sub]||'📦';
+      const name=ITEM_NAMES[it.sub]||it.sub;
+      const info=it.type==='gun'?` (${it.ammo}発)`:
+                 (it.type==='ammo'||it.type==='parts')&&it.amount>1?` ×${it.amount}`:'';
+      return `<div class="nearby-item" data-idx="${i}">${icon} ${name}${info}</div>`;
+    }).join('');
+
+    $nearbyPanel.querySelectorAll('.nearby-item').forEach(el=>{
+      const i=parseInt(el.dataset.idx);
+      const doPickup=()=>{ const wi=nearbyWorldItems[i]; if(wi&&!wi.collected)pickupWorldItem(wi); };
+      el.addEventListener('click',doPickup);
+      el.addEventListener('touchend',e=>{e.preventDefault();doPickup();});
+    });
+  }
+
+  // ── Inventory UI ──
+  const INV_CELL=58, INV_GAP=3, INV_PAD=4;
+
+  function openInv(){
+    invOpen=true;
+    if($invOverlay)$invOverlay.style.display='flex';
+    renderInvUI();
+    // hide nearby panel while inv open
+    if($nearbyPanel)$nearbyPanel.style.display='none';
+  }
+
+  function closeInv(){
+    invOpen=false; invCtxId=null;
+    if($invOverlay)$invOverlay.style.display='none';
+    const ctx=document.getElementById('inv-ctx');
+    if(ctx)ctx.style.display='none';
+  }
+
+  function renderInvUI(){
+    const gridEl=document.getElementById('inv-grid');
+    if(!gridEl)return;
+    gridEl.innerHTML='';
+
+    // Background cells
+    for(let r=0;r<INV_ROWS;r++)
+      for(let c=0;c<INV_COLS;c++){
+        const cell=document.createElement('div');
+        cell.className='inv-cell';
+        gridEl.appendChild(cell);
+      }
+
+    // Item divs
+    invItems.forEach(item=>{
+      const div=document.createElement('div');
+      div.className='inv-item'+(invCtxId===item.id?' selected':'');
+      div.style.left=(item.col*(INV_CELL+INV_GAP)+INV_PAD)+'px';
+      div.style.top=(item.row*(INV_CELL+INV_GAP)+INV_PAD)+'px';
+      div.style.width=(item.w*INV_CELL+(item.w-1)*INV_GAP)+'px';
+      div.style.height=(item.h*INV_CELL+(item.h-1)*INV_GAP)+'px';
+      const icon=ITEM_ICONS[item.sub]||'📦';
+      let extra='';
+      if(item.type==='gun') extra=`<small>${item.ammo}発</small>`;
+      else if(item.amount>1) extra=`<span class="inv-count">${item.amount}</span>`;
+      div.innerHTML=`<span class="inv-icon">${icon}</span>${extra}`;
+      const doSelect=()=>selectInvItem(item.id);
+      div.addEventListener('click',doSelect);
+      div.addEventListener('touchend',e=>{e.preventDefault();doSelect();});
+      gridEl.appendChild(div);
+    });
+
+    // Equipment slots
+    const eqMelee=document.getElementById('equip-melee');
+    const eqGun=document.getElementById('equip-gun');
+    if(eqMelee){
+      eqMelee.innerHTML=`<div class="eq-label">近接</div><div class="eq-val">⚔ ${player.melee.name}</div>`;
+      eqMelee.className='equip-slot'+(player.melee.id!=='fists'?' has-item':'');
+    }
+    if(eqGun){
+      if(player.gun){
+        eqGun.innerHTML=`<div class="eq-label">銃</div><div class="eq-val">🔫 ${player.gun.name}<br><small>${player.gun.ammo}/${GUNS[player.gun.id].maxAmmo}発</small></div>`;
+        eqGun.className='equip-slot has-item';
+      } else {
+        eqGun.innerHTML=`<div class="eq-label">銃</div><div class="eq-val" style="color:#555">なし</div>`;
+        eqGun.className='equip-slot';
+      }
+    }
+
+    // Unequip gun button
+    const btnUnequipGun=document.getElementById('inv-unequip-gun');
+    if(btnUnequipGun){
+      btnUnequipGun.style.display=player.gun?'inline-block':'none';
+      btnUnequipGun.onclick=()=>{
+        if(!player.gun)return;
+        if(invAdd('gun',player.gun.id,1,player.gun.ammo)){
+          player.gun=null; updateHUD(); renderInvUI();
+          notify('銃をバッグにしまった');
+        } else notify('インベントリがいっぱい！');
+      };
+    }
+    const btnUnequipMelee=document.getElementById('inv-unequip-melee');
+    if(btnUnequipMelee){
+      btnUnequipMelee.style.display=player.melee.id!=='fists'?'inline-block':'none';
+      btnUnequipMelee.onclick=()=>{
+        if(player.melee.id==='fists')return;
+        if(invAdd('melee',player.melee.id,1,0)){
+          player.melee={...MELEE.fists,id:'fists'}; updateHUD(); renderInvUI();
+          notify('武器をバッグにしまった');
+        } else notify('インベントリがいっぱい！');
+      };
+    }
+
+    // Context menu update
+    const ctx=document.getElementById('inv-ctx');
+    if(ctx&&invCtxId===null) ctx.style.display='none';
+  }
+
+  function selectInvItem(id){
+    if(invCtxId===id){ invCtxId=null; renderInvUI(); const ctx=document.getElementById('inv-ctx'); if(ctx)ctx.style.display='none'; return; }
+    invCtxId=id;
+    renderInvUI();
+    const ctx=document.getElementById('inv-ctx');
+    const item=invGetItem(id);
+    if(!item||!ctx)return;
+    ctx.style.display='flex';
+    const btnEquip=document.getElementById('inv-ctx-equip');
+    const btnUse=document.getElementById('inv-ctx-use');
+    if(btnEquip) btnEquip.style.display=(item.type==='melee'||item.type==='gun')?'':'none';
+    if(btnUse)   btnUse.style.display=(item.type==='heal'||item.type==='ammo')?'':'none';
+  }
+
+  // ================================================================
   //  START / OVERLAYS
   // ================================================================
   function showStart(){
     state='start'; overlayAction='start';
     $oTitle.textContent='🧟 ZOMBIE ESCAPE';
 
-    // Upgrade summary
     const upgStr = UPG_DEFS.map(u=> upgrades[u.id]>0?`${u.icon}Lv${upgrades[u.id]}`:'').filter(Boolean).join(' ');
     const upgLine = upgStr?`<p style="font-size:11px;color:#88ddff;margin-bottom:8px">強化済み: ${upgStr}</p>`:'';
 
-    // Save data
     const save=hasSave()?loadRunData():null;
     const saveHtml=save?`
       <div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.12);padding-top:12px">
@@ -645,7 +1008,7 @@
       <p style="font-size:12px;opacity:0.7;line-height:1.75;margin-bottom:10px">
         緑の扉を目指せ！箱を漁って武器ゲット<br>
         左タッチ：移動 &nbsp;右スワイプ：視点 &nbsp;[Shift]：走る<br>
-        ⚔ATK &nbsp;🔫FIRE &nbsp;💊HEAL &nbsp;📦OPEN &nbsp;🏠UPGRADE</p>
+        ⚔ATK &nbsp;🔫FIRE &nbsp;💊HEAL &nbsp;📦OPEN &nbsp;🎒BAG</p>
       ${upgLine}
       <p style="font-size:12px;color:#aaa;margin-bottom:8px">難易度：</p>
       <div class="diff-row">
@@ -658,6 +1021,8 @@
     $oBtn.style.display='';
     $overlay.style.display='flex'; $hud.style.display='none';
     document.getElementById('action-buttons').style.display='none';
+    if($nearbyPanel)$nearbyPanel.style.display='none';
+    closeInv();
 
     $overlay.querySelectorAll('.diff-btn[data-d]').forEach(b=>{
       b.addEventListener('click',e=>{e.stopPropagation();currentDiff=b.dataset.d;D=DIFFS[currentDiff];showStart();});
@@ -696,7 +1061,7 @@
     try {
       currentDiff=data.diff||'normal'; D=DIFFS[currentDiff];
       grid=data.grid;
-      buildScene(true); // build static geometry, no spawns
+      buildScene(true);
       spawnPlayer();
       restorePlayer(data.player);
       restoreZombies(data.zombies||[]);
@@ -706,6 +1071,21 @@
       gameStartTime=performance.now()-(data.elapsed||0)*1000;
       gameElapsed=data.elapsed||0;
       cameraAngle=data.player.angle||0;
+
+      // Restore inventory (v3) or migrate old heals/parts from v2
+      invInit();
+      if(data.inventory&&data.inventory.length>0){
+        for(const saved of data.inventory){
+          const sz=ITEM_SIZES[saved.sub]||{w:1,h:1};
+          if(invCanPlace(saved.row,saved.col,sz.w,sz.h)){
+            const item={...saved,id:invNextId++,w:sz.w,h:sz.h};
+            invItems.push(item); invPlaceItem(item);
+          } else {
+            const slot=invFindSlot(sz.w,sz.h);
+            if(slot){ const item={...saved,id:invNextId++,row:slot.row,col:slot.col,w:sz.w,h:sz.h}; invItems.push(item); invPlaceItem(item); }
+          }
+        }
+      }
       enterGame();
     } catch(err){
       $oTitle.textContent='ロードエラー';
@@ -721,6 +1101,8 @@
     $oBtn.textContent='メニューへ'; $oBtn.style.display='';
     $overlay.style.display='flex'; $hud.style.display='none';
     document.getElementById('action-buttons').style.display='none';
+    if($nearbyPanel)$nearbyPanel.style.display='none';
+    closeInv();
     bindUpgradeBtn();
   }
 
@@ -751,14 +1133,36 @@
     addBtn('btn-fire',()=>doShoot());
     addBtn('btn-heal',()=>doHeal());
     addBtn('btn-interact',()=>doInteract());
-    addBtn('btn-swap-yes',()=>confirmSwap(true));
-    addBtn('btn-swap-no',()=>confirmSwap(false));
+    addBtn('btn-inv',()=>{if(invOpen)closeInv();else openInv();});
+
     document.getElementById('btn-upgrade-close')
       .addEventListener('click',()=>closeUpgradeModal());
+
+    // Inventory context menu buttons
+    const btnClose=document.getElementById('btn-inv-close');
+    if(btnClose){ btnClose.addEventListener('click',()=>closeInv()); btnClose.addEventListener('touchend',e=>{e.preventDefault();closeInv();}); }
+
+    const btnCtxEquip=document.getElementById('inv-ctx-equip');
+    if(btnCtxEquip){ addBtnDirect(btnCtxEquip,()=>{if(invCtxId!==null)invEquip(invCtxId);}); }
+
+    const btnCtxUse=document.getElementById('inv-ctx-use');
+    if(btnCtxUse){ addBtnDirect(btnCtxUse,()=>{if(invCtxId!==null)invUse(invCtxId);}); }
+
+    const btnCtxDrop=document.getElementById('inv-ctx-drop');
+    if(btnCtxDrop){ addBtnDirect(btnCtxDrop,()=>{if(invCtxId!==null){invDrop(invCtxId);invCtxId=null;const ctx=document.getElementById('inv-ctx');if(ctx)ctx.style.display='none';}}); }
+
+    const btnCtxCancel=document.getElementById('inv-ctx-cancel');
+    if(btnCtxCancel){ addBtnDirect(btnCtxCancel,()=>{invCtxId=null;const ctx=document.getElementById('inv-ctx');if(ctx)ctx.style.display='none';renderInvUI();}); }
   }
 
   function addBtn(id,fn){
     const el=document.getElementById(id); if(!el)return;
+    let lt=0;
+    el.addEventListener('touchstart',e=>{e.preventDefault();e.stopPropagation();lt=Date.now();fn();});
+    el.addEventListener('click',()=>{if(Date.now()-lt>400)fn();});
+  }
+  function addBtnDirect(el,fn){
+    if(!el)return;
     let lt=0;
     el.addEventListener('touchstart',e=>{e.preventDefault();e.stopPropagation();lt=Date.now();fn();});
     el.addEventListener('click',()=>{if(Date.now()-lt>400)fn();});
@@ -773,10 +1177,11 @@
 
   function onTS(e){
     if(state!=='playing')return;
+    if(invOpen)return; // don't process game input while inventory open
     const hw=window.innerWidth/2;
     for(const t of e.changedTouches){
       const el=document.elementFromPoint(t.clientX,t.clientY);
-      if(el&&el.closest('#action-buttons,#overlay,#swap-prompt,#upgrade-modal'))continue;
+      if(el&&el.closest('#action-buttons,#overlay,#swap-prompt,#upgrade-modal,#inv-overlay,#nearby-panel'))continue;
       e.preventDefault();
       if(t.clientX<hw&&!joy.on){
         joy={on:true,id:t.identifier,bx:t.clientX,by:t.clientY,dx:0,dy:0};
@@ -788,7 +1193,7 @@
     }
   }
   function onTM(e){
-    if(state!=='playing')return;
+    if(state!=='playing'||invOpen)return;
     for(const t of e.changedTouches){
       if(t.identifier===joy.id){
         e.preventDefault();
@@ -818,7 +1223,6 @@
     meleeCD=player.melee.cd;
     SFX.melee();
 
-    // Swing animation: tilt player mesh forward briefly
     swingTimer=0.22;
     addSwingArc();
 
@@ -837,7 +1241,6 @@
   }
 
   function addSwingArc(){
-    // Remove old arc if any
     if(swingMesh){scene.remove(swingMesh);swingMesh=null;}
     const mat=new THREE.MeshBasicMaterial({color:0xffdd66,transparent:true,opacity:0.5,side:THREE.DoubleSide,depthWrite:false});
     const geo=new THREE.CircleGeometry(player.melee.range,8,Math.PI/2-player.melee.arc/2,player.melee.arc);
@@ -850,15 +1253,19 @@
   function doShoot(){
     if(state!=='playing')return;
     if(!player.gun||gunCD>0)return;
-    if(player.gun.ammo<=0){notify('弾切れ！');SFX.empty();return;}
+    if(player.gun.ammo<=0){
+      // Try auto-reload from inventory
+      const ammoSub=player.gun.id+'_ammo';
+      const ammoItem=invItems.find(i=>i.type==='ammo'&&i.sub===ammoSub);
+      if(ammoItem){ invUse(ammoItem.id); return; }
+      notify('弾切れ！リロードできる弾もない');SFX.empty();return;
+    }
     player.gun.ammo--; gunCD=GUNS[player.gun.id].fireCd;
     (player.gun.id==='shotgun'?SFX.shotgun:SFX.shoot)();
 
-    // Brief backward tilt (recoil)
     swingTimer=0.14;
 
     const origin=new THREE.Vector3(player.x,1.2,player.z);
-    // Shoot toward camera-facing direction so aiming matches the view
     const fwd=new THREE.Vector3(-Math.sin(cameraAngle),0,-Math.cos(cameraAngle)).normalize();
     const baseDmg=eff.gunDmg(GUNS[player.gun.id].dmg);
     const range=GUNS[player.gun.id].range;
@@ -885,11 +1292,13 @@
 
   function doHeal(){
     if(state!=='playing')return;
-    if(player.heals<=0||healCD>0)return;
+    if(healCD>0)return;
     if(player.hp>=eff.hpMax()){notify('HPは満タン！');return;}
-    player.heals--; healCD=1.5;
-    player.hp=Math.min(eff.hpMax(),player.hp+40);
-    SFX.heal(); notify('💊 HP +40 回復'); updateHUD();
+    // Find best heal item (medkit > bandage)
+    const healItem = invItems.find(i=>i.type==='heal'&&i.sub==='medkit') ||
+                     invItems.find(i=>i.type==='heal');
+    if(!healItem){notify('回復アイテムがない！');return;}
+    invUse(healItem.id);
   }
 
   function killZombie(idx){
@@ -901,7 +1310,7 @@
   }
 
   // ================================================================
-  //  INTERACT / PICKUP
+  //  INTERACT
   // ================================================================
   function doInteract(){
     if(state!=='playing')return;
@@ -923,76 +1332,21 @@
     nearContainer=null; $interactPrompt.style.display='none';
   }
 
-  function pickupItem(item){
-    item.collected=true; scene.remove(item.mesh);
-    switch(item.type){
-      case 'heal':
-        player.heals++; SFX.pickup(); notify(`💊 回復アイテム入手！(×${player.heals})`); break;
-      case 'parts':
-        player.parts+=item.amount; SFX.pickup(); notify(`🔧 資材 +${item.amount}（計${player.parts}個）`); break;
-      case 'ammo':
-        if(player.gun){
-          const max=GUNS[player.gun.id].maxAmmo;
-          player.gun.ammo=Math.min(max,player.gun.ammo+item.amount);
-          SFX.pickup(); notify(`🔫 弾薬 +${item.amount}（残弾:${player.gun.ammo}）`);
-        } else { SFX.pickup(); notify(`弾薬を拾った（銃がない）`); }
-        break;
-      case 'melee':{
-        const def=MELEE[item.sub];
-        if(player.melee.id==='fists'||def.dmg>player.melee.dmg){
-          player.melee={...def,id:item.sub}; SFX.pickup(); notify(`⚔ ${def.name}を装備！`);
-        } else { showSwapPrompt(item); return; }
-        break;
-      }
-      case 'gun':
-        if(!player.gun){
-          player.gun={...GUNS[item.sub],id:item.sub,ammo:item.ammo};
-          SFX.pickup(); notify(`🔫 ${GUNS[item.sub].name}入手！(弾${item.ammo}発)`);
-        } else { showSwapPrompt(item); return; }
-        break;
-    }
-    updateHUD();
-  }
-
-  function showSwapPrompt(item){
-    nearWeaponItem=item;
-    const def=item.type==='gun'?GUNS[item.sub]:MELEE[item.sub];
-    const cur=item.type==='gun'?(player.gun?GUNS[player.gun.id].name:'なし'):player.melee.name;
-    const ammoStr=item.type==='gun'?` (弾${item.ammo}発)`:'';
-    $swapText.textContent=`${def.name}${ammoStr} と交換？\n現在: ${cur}`;
-    $swapPrompt.style.display='flex';
-  }
-  function confirmSwap(yes){
-    $swapPrompt.style.display='none';
-    if(!nearWeaponItem||!yes){nearWeaponItem=null;return;}
-    const item=nearWeaponItem; nearWeaponItem=null;
-    item.collected=true; scene.remove(item.mesh);
-    SFX.pickup();
-    if(item.type==='gun'){
-      player.gun={...GUNS[item.sub],id:item.sub,ammo:item.ammo};
-      notify(`🔫 ${GUNS[item.sub].name}に交換！`);
-    } else {
-      player.melee={...MELEE[item.sub],id:item.sub};
-      notify(`⚔ ${MELEE[item.sub].name}に交換！`);
-    }
-    updateHUD();
-  }
-
   // ================================================================
   //  SAFEHOUSE UPGRADES
   // ================================================================
   function upgradeButtonHtml(){
+    const pc=invCountType('parts');
     return `<div style="margin-top:14px">
       <button id="btn-open-upgrade" style="
         padding:10px 28px;border:2px solid rgba(0,180,255,0.6);border-radius:30px;
         background:rgba(0,60,120,0.6);color:#88ddff;font-size:14px;font-weight:bold;
         cursor:pointer;-webkit-tap-highlight-color:transparent;">
-        🏠 セーフハウス アップグレード (🔧 ${player.parts})
+        🏠 セーフハウス アップグレード (🔧 ${pc})
       </button></div>`;
   }
 
   function bindUpgradeBtn(){
-    // Called after overlay innerHTML is set (re-bind each time)
     const btn=document.getElementById('btn-open-upgrade');
     if(!btn)return;
     btn.addEventListener('click',()=>showUpgradeModal());
@@ -1000,7 +1354,6 @@
   }
 
   function showUpgradeModal(){
-    // Only accessible from death/win overlays (not during gameplay)
     if(state==='playing') return;
     renderUpgradeModal();
     $upgradeModal.style.display='flex';
@@ -1012,10 +1365,11 @@
   function renderUpgradeModal(){
     const list = document.getElementById('upgrade-list');
     list.innerHTML = '';
+    const pc=invCountType('parts');
     UPG_DEFS.forEach(u=>{
       const lv=upgrades[u.id]||0;
       const maxed=lv>=u.max;
-      const canBuy=!maxed&&player.parts>=u.cost;
+      const canBuy=!maxed&&pc>=u.cost;
       const div=document.createElement('div');
       div.className='upg-row';
       div.innerHTML=`
@@ -1031,11 +1385,11 @@
         </button>`;
       list.appendChild(div);
     });
-    document.getElementById('upgrade-parts').textContent=player.parts;
-    list.querySelectorAll('.upg-btn:not(.disabled):not([data-id=""])').forEach(btn=>{
+    document.getElementById('upgrade-parts').textContent=pc;
+    list.querySelectorAll('.upg-btn:not(.disabled)').forEach(btn=>{
       const id=btn.dataset.id;
       const u=UPG_DEFS.find(x=>x.id===id);
-      if(!u||(upgrades[id]||0)>=u.max||player.parts<u.cost)return;
+      if(!u||(upgrades[id]||0)>=u.max||pc<u.cost)return;
       btn.addEventListener('click',()=>buyUpgrade(id));
       btn.addEventListener('touchend',e=>{e.preventDefault();buyUpgrade(id);});
     });
@@ -1045,13 +1399,13 @@
     const u=UPG_DEFS.find(x=>x.id===id);
     if(!u) return;
     if((upgrades[id]||0)>=u.max){notify('最大レベルです！');return;}
-    if(player.parts<u.cost){notify('資材が足りない！');return;}
-    player.parts-=u.cost;
+    const pc=invCountType('parts');
+    if(pc<u.cost){notify('資材が足りない！');return;}
+    invDeductParts(u.cost);
     upgrades[id]=(upgrades[id]||0)+1;
     saveUpgrades();
     SFX.upgrade();
     notify(`🏠 ${u.name} Lv${upgrades[id]}にアップグレード！`);
-    // Apply HP/ST increase immediately
     if(id==='hpUp')   player.hp=Math.min(eff.hpMax(),player.hp+20);
     if(id==='stUp')   player.stamina=Math.min(eff.stMax(),player.stamina+15);
     renderUpgradeModal();
@@ -1097,45 +1451,45 @@
       if(player.exhausted&&player.stamina>ST_THRESH)player.exhausted=false;
     }
 
-    // Move input
-    let fwd=0,str=0;
-    if(keys['KeyW']||keys['ArrowUp'])   fwd+=1;
-    if(keys['KeyS']||keys['ArrowDown']) fwd-=1;
-    if(keys['KeyA'])str-=1; if(keys['KeyD'])str+=1;
-    // Arrow left/right rotate camera
-    if(keys['ArrowLeft']) cameraAngle+=1.9*dt;
-    if(keys['ArrowRight'])cameraAngle-=1.9*dt;
-    if(joy.on){fwd+=-joy.dy; str+=joy.dx;}
-    if(keys['Space']&&!prevKeys['Space'])doMelee();
-    if(keys['KeyF']&&!prevKeys['KeyF'])doShoot();
-    if(keys['KeyR']&&!prevKeys['KeyR'])doHeal();
-    if(keys['KeyE']&&!prevKeys['KeyE'])doInteract();
-    for(const k in keys)prevKeys[k]=keys[k];
+    // Move input (skip if inventory open)
+    if(!invOpen){
+      let fwd=0,str=0;
+      if(keys['KeyW']||keys['ArrowUp'])   fwd+=1;
+      if(keys['KeyS']||keys['ArrowDown']) fwd-=1;
+      if(keys['KeyA'])str-=1; if(keys['KeyD'])str+=1;
+      if(keys['ArrowLeft']) cameraAngle+=1.9*dt;
+      if(keys['ArrowRight'])cameraAngle-=1.9*dt;
+      if(joy.on){fwd+=-joy.dy; str+=joy.dx;}
+      if(keys['Space']&&!prevKeys['Space'])doMelee();
+      if(keys['KeyF']&&!prevKeys['KeyF'])doShoot();
+      if(keys['KeyR']&&!prevKeys['KeyR'])doHeal();
+      if(keys['KeyE']&&!prevKeys['KeyE'])doInteract();
+      if(keys['KeyB']&&!prevKeys['KeyB']){if(invOpen)closeInv();else openInv();}
+      for(const k in keys)prevKeys[k]=keys[k];
 
-    if(fwd!==0||str!==0){
-      // World-space movement direction based on camera angle
-      const len=Math.sqrt(fwd*fwd+str*str)||1, nf=fwd/len, ns=str/len;
-      const sinC=Math.sin(cameraAngle), cosC=Math.cos(cameraAngle);
-      const wx=-sinC*nf+cosC*ns;   // world X
-      const wz=-cosC*nf-sinC*ns;   // world Z
-
-      // Rotate character to face movement direction (smooth)
-      const targetAngle=Math.atan2(-wx,-wz);
-      const diff=angleDiff(targetAngle,player.angle);
-      player.angle+=Math.sign(diff)*Math.min(Math.abs(diff),12*dt);
-
-      const spd=(sprinting&&!player.exhausted)?eff.sprintSpd():eff.walkSpd();
-      tryMove(player,wx*spd*dt,wz*spd*dt,PLAYER_R);
+      if(fwd!==0||str!==0){
+        const len=Math.sqrt(fwd*fwd+str*str)||1, nf=fwd/len, ns=str/len;
+        const sinC=Math.sin(cameraAngle), cosC=Math.cos(cameraAngle);
+        const wx=-sinC*nf+cosC*ns;
+        const wz=-cosC*nf-sinC*ns;
+        const targetAngle=Math.atan2(-wx,-wz);
+        const diff=angleDiff(targetAngle,player.angle);
+        player.angle+=Math.sign(diff)*Math.min(Math.abs(diff),12*dt);
+        const spd=(sprinting&&!player.exhausted)?eff.sprintSpd():eff.walkSpd();
+        tryMove(player,wx*spd*dt,wz*spd*dt,PLAYER_R);
+      }
+    } else {
+      for(const k in keys)prevKeys[k]=keys[k];
     }
 
-    // Player mesh tilt on swing
+    // Player mesh
     const tiltX = swingTimer>0 ? Math.sin(swingTimer*Math.PI/0.22)*0.35 : 0;
     player.mesh.position.set(player.x,0,player.z);
     player.mesh.rotation.set(tiltX,player.angle,0,'YXZ');
 
     const pl=scene.getObjectByName('pLight'); if(pl)pl.position.set(player.x,2.2,player.z);
 
-    // Camera follows behind player based on cameraAngle (independent of player facing)
+    // Camera
     const sinC=Math.sin(cameraAngle), cosC=Math.cos(cameraAngle);
     camera.position.x+=(player.x+sinC*CAM_DIST-camera.position.x)*CAM_LERP;
     camera.position.y+=(CAM_H-camera.position.y)*CAM_LERP;
@@ -1147,22 +1501,21 @@
     if(exitMesh)exitMesh.rotation.y=t*1.1;
     const ring=scene.getObjectByName('exitRing'); if(ring)ring.material.opacity=0.3+0.25*Math.sin(t*2.5);
 
-    // Safehouse visual pulse (decorative only during gameplay)
+    // Safehouse visual
     const sl=scene.getObjectByName('safeLight');
     if(sl)sl.intensity=1.0+0.3*Math.sin(t*2);
     const sc=scene.getObjectByName('safeCircle');
     if(sc)sc.material.opacity=0.12+0.04*Math.sin(t*2);
 
-    // Items bob + pickup
+    // Items bob (no auto-pickup anymore)
     worldItems=worldItems.filter(it=>!it.collected);
     for(const it of worldItems){
       it.mesh.position.y=0.45+Math.sin(t*2+it.bob)*0.1;
       it.mesh.rotation.y=t*0.9+it.bob;
-      if(dist2(player.x,player.z,it.x,it.z)<PICKUP_R){
-        if((it.type==='melee'||it.type==='gun')&&nearWeaponItem)continue;
-        pickupItem(it);
-      }
     }
+
+    // Nearby items panel
+    renderNearbyPanel();
 
     // Containers
     nearContainer=null;
@@ -1176,7 +1529,6 @@
     for(let i=zombies.length-1;i>=0;i--){
       const z=zombies[i];
 
-      // Hit flash
       if(z.flashTimer>0){
         z.flashTimer-=dt;
         z.mesh.traverse(c=>{
@@ -1199,7 +1551,6 @@
         z.angle=z.wDir;
       }
 
-      // Attack animation: lunge forward when close
       if(z.attackAnim>0){
         z.attackAnim-=dt;
         const lungeAmt=Math.sin(z.attackAnim/0.25*Math.PI)*0.45;
@@ -1210,12 +1561,11 @@
       }
       z.mesh.rotation.y=z.angle;
 
-      // Deal damage + trigger lunge
       if(d<1.15){
         player.hp-=D.zDmg*dt;
         if(now-z.lastDmg>450){
           z.lastDmg=now;
-          z.attackAnim=0.25; // lunge duration
+          z.attackAnim=0.25;
           flashDamage(); SFX.hit();
           if(Math.random()<0.5)SFX.zombie();
         }
@@ -1225,7 +1575,6 @@
     player.hp=Math.max(0,player.hp);
     updateHUD();
 
-    // Auto-save
     saveTimer-=dt;
     if(saveTimer<=0){saveTimer=5;saveRun();}
 
@@ -1257,17 +1606,19 @@
       $gunInfo.style.color=player.gun.ammo>0?'#ffdd88':'#ff4444'; $gunInfo.className='';
     } else { $gunInfo.textContent='🔫 なし'; $gunInfo.style.color=''; $gunInfo.className='dim'; }
 
-    $healCount.textContent=`💊 ×${player.heals}`;
-    $healCount.className=player.heals>0?'':'dim';
+    const healCnt=invCountType('heal');
+    $healCount.textContent=`💊 ×${healCnt}`;
+    $healCount.className=healCnt>0?'':'dim';
 
-    if($partsNum){$partsNum.textContent=player.parts; document.getElementById('parts-row').style.display=player.parts>0?'inline':'none';}
+    const partsCnt=invCountType('parts');
+    if($partsNum){$partsNum.textContent=partsCnt; document.getElementById('parts-row').style.display=partsCnt>0?'inline':'none';}
 
     const d=dist2(player.x,player.z,exitPos.x,exitPos.z);
     $exitHint.textContent=d<20?'🟢 出口が近い！':`🟢 出口まで約${Math.round(d)}m`;
 
     document.getElementById('btn-attack').style.opacity=player.exhausted?'0.4':'1';
     document.getElementById('btn-fire').style.opacity=(player.gun&&player.gun.ammo>0)?'1':'0.35';
-    document.getElementById('btn-heal').style.opacity=player.heals>0?'1':'0.35';
+    document.getElementById('btn-heal').style.opacity=healCnt>0?'1':'0.35';
 
     if($timerNum)$timerNum.textContent=fmtTime(gameElapsed);
     if($killNum) $killNum.textContent=killCount;
@@ -1276,7 +1627,6 @@
   let fTO=null;
   function flashDamage(){$flash.style.opacity='1';clearTimeout(fTO);fTO=setTimeout(()=>$flash.style.opacity='0',350);}
 
-  // Notification log (bottom-left, subtle)
   const notifQueue=[];
   let notifTO=null;
   function notify(txt){
@@ -1305,11 +1655,11 @@
   function gameOver(){
     if(state!=='playing')return;
     state='respawning'; SFX.gameover();
-    saveRun(); // Save the state (player will be at safehouse on next load)
+    saveRun();
 
     $oTitle.textContent='💀 やられた...';
     $oBody.innerHTML=`
-      <p style="color:#ff4444;font-size:15px;font-weight:bold">全アイテムロスト</p>
+      <p style="color:#ff4444;font-size:15px;font-weight:bold">全アイテムロスト（資材は持越し）</p>
       <p style="font-size:13px;color:#aaa;margin-top:10px">
         🕐 ${fmtTime(gameElapsed)} &nbsp;💀 ${killCount}体撃破
       </p>
@@ -1321,9 +1671,10 @@
     $overlay.style.display='flex';
     $hud.style.display='none';
     document.getElementById('action-buttons').style.display='none';
+    if($nearbyPanel)$nearbyPanel.style.display='none';
+    closeInv();
     bindUpgradeBtn();
 
-    // Auto-respawn after 3s
     clearTimeout(respawnTO);
     respawnTO=setTimeout(()=>{if(state==='respawning')doRespawn();},3000);
   }
@@ -1337,25 +1688,27 @@
   }
 
   function respawnAtSafehouse(){
-    // Reset player to safehouse, lose all items
     const ps=gw(1,1);
     player.x=ps.x; player.z=ps.z; player.angle=0;
     player.hp=eff.hpMax(); player.stamina=eff.stMax(); player.exhausted=false;
     player.melee={...MELEE.fists,id:'fists'};
-    player.gun=null; player.heals=0;
-    // Keep parts! (they were earned this run and stored upgrades are saved)
+    player.gun=null;
     meleeCD=0; gunCD=0; healCD=0; exhaustedNotified=false;
     player.mesh.position.set(player.x,0,player.z);
     player.mesh.rotation.set(0,0,0);
 
-    // Respawn all zombies at new random positions
+    // Keep parts, lose everything else
+    const keptParts=invCountType('parts');
+    invInit();
+    if(keptParts>0) invAdd('parts','parts',keptParts,0);
+
     zombies.forEach(z=>scene.remove(z.mesh));
     zombies=[];
     spawnZombies();
 
     state='playing';
     updateHUD();
-    notify('🏠 セーフハウスに帰還。全アイテムロスト');
+    notify('🏠 セーフハウスに帰還。アイテムロスト（資材は持越し）');
     saveRun();
   }
 

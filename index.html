@@ -44,17 +44,20 @@
     <div id="exit-hint">🟢 出口を目指せ！</div>
     <div id="hud-stats">🕐 <span id="timer-num">0:00</span> &nbsp; 💀 <span id="kill-num">0</span></div>
     <!-- PC hint -->
-    <div id="kb-hint">[Space]ATK &nbsp; [F]FIRE &nbsp; [R]HEAL &nbsp; [E]OPEN &nbsp; [Shift]走る</div>
+    <div id="kb-hint">[Space]ATK &nbsp; [F]FIRE &nbsp; [R]HEAL &nbsp; [E]OPEN &nbsp; [B]BAG &nbsp; [Shift]走る</div>
   </div>
 
   <!-- Pickup toast (bottom-left) -->
   <div id="pickup-notif"></div>
 
+  <!-- Nearby items panel -->
+  <div id="nearby-panel"></div>
+
   <!-- Interact prompt -->
   <div id="interact-prompt">📦 <b>OPEN</b> をタップ / <kbd>E</kbd></div>
 
-  <!-- Weapon swap modal -->
-  <div id="swap-prompt">
+  <!-- Weapon swap modal (kept for safety, unused) -->
+  <div id="swap-prompt" style="display:none">
     <p id="swap-text"></p>
     <div class="swap-row">
       <button id="btn-swap-yes">交換する</button>
@@ -74,11 +77,53 @@
     </div>
   </div>
 
+  <!-- Inventory Overlay -->
+  <div id="inv-overlay">
+    <div id="inv-panel">
+      <div id="inv-header">
+        <span>🎒 インベントリ</span>
+        <button id="btn-inv-close">✕</button>
+      </div>
+
+      <!-- Equipment slots -->
+      <div id="inv-equip">
+        <div class="equip-slot" id="equip-melee">
+          <div class="eq-label">近接</div>
+          <div class="eq-val">⚔ 素手</div>
+        </div>
+        <div class="equip-slot" id="equip-gun">
+          <div class="eq-label">銃</div>
+          <div class="eq-val" style="color:#555">なし</div>
+        </div>
+      </div>
+      <div id="inv-unequip-row">
+        <button id="inv-unequip-melee" style="display:none" class="inv-unequip-btn">近接をしまう</button>
+        <button id="inv-unequip-gun"   style="display:none" class="inv-unequip-btn">銃をしまう</button>
+      </div>
+
+      <!-- Grid -->
+      <div id="inv-grid-wrap">
+        <div id="inv-grid">
+          <!-- cells + items injected by JS -->
+        </div>
+      </div>
+
+      <!-- Context menu -->
+      <div id="inv-ctx" style="display:none">
+        <button id="inv-ctx-equip" style="display:none">🗡 装備する</button>
+        <button id="inv-ctx-use"   style="display:none">✅ 使う</button>
+        <button id="inv-ctx-drop">🗑 捨てる</button>
+        <button id="inv-ctx-cancel">キャンセル</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Action buttons (bottom right) -->
   <div id="action-buttons">
     <button id="btn-interact" class="abtn interact-abtn" style="display:none">📦<br><small>OPEN</small></button>
-    <button id="btn-heal" class="abtn">💊<br><small>HEAL</small></button>
-    <button id="btn-fire" class="abtn">🔫<br><small>FIRE</small></button>
+    <button id="btn-inv"   class="abtn inv-abtn">🎒<br><small>BAG</small></button>
+    <button id="btn-heal"  class="abtn">💊<br><small>HEAL</small></button>
+    <button id="btn-fire"  class="abtn">🔫<br><small>FIRE</small></button>
     <button id="btn-attack" class="abtn atk-abtn">⚔️<br><small>ATK</small></button>
   </div>
 
