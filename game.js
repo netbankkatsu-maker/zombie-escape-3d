@@ -717,6 +717,7 @@
     $oBtn.textContent='メニューへ'; $oBtn.style.display='';
     $overlay.style.display='flex'; $hud.style.display='none';
     document.getElementById('action-buttons').style.display='none';
+    bindUpgradeBtn();
   }
 
   // ================================================================
@@ -746,7 +747,6 @@
     addBtn('btn-fire',()=>doShoot());
     addBtn('btn-heal',()=>doHeal());
     addBtn('btn-interact',()=>doInteract());
-    addBtn('btn-upgrade',()=>showUpgradeModal());
     addBtn('btn-swap-yes',()=>confirmSwap(true));
     addBtn('btn-swap-no',()=>confirmSwap(false));
     document.getElementById('btn-upgrade-close')
@@ -976,16 +976,32 @@
   // ================================================================
   //  SAFEHOUSE UPGRADES
   // ================================================================
+  function upgradeButtonHtml(){
+    return `<div style="margin-top:14px">
+      <button id="btn-open-upgrade" style="
+        padding:10px 28px;border:2px solid rgba(0,180,255,0.6);border-radius:30px;
+        background:rgba(0,60,120,0.6);color:#88ddff;font-size:14px;font-weight:bold;
+        cursor:pointer;-webkit-tap-highlight-color:transparent;">
+        🏠 セーフハウス アップグレード (🔧 ${player.parts})
+      </button></div>`;
+  }
+
+  function bindUpgradeBtn(){
+    // Called after overlay innerHTML is set (re-bind each time)
+    const btn=document.getElementById('btn-open-upgrade');
+    if(!btn)return;
+    btn.addEventListener('click',()=>showUpgradeModal());
+    btn.addEventListener('touchend',e=>{e.preventDefault();showUpgradeModal();});
+  }
+
   function showUpgradeModal(){
-    if(state!=='playing'||!nearSafehouse) return;
-    state='upgrading';
+    // Only accessible from death/win overlays (not during gameplay)
+    if(state==='playing') return;
     renderUpgradeModal();
     $upgradeModal.style.display='flex';
   }
   function closeUpgradeModal(){
     $upgradeModal.style.display='none';
-    state='playing';
-    updateHUD();
   }
 
   function renderUpgradeModal(){
@@ -1086,7 +1102,6 @@
     if(keys['KeyF']&&!prevKeys['KeyF'])doShoot();
     if(keys['KeyR']&&!prevKeys['KeyR'])doHeal();
     if(keys['KeyE']&&!prevKeys['KeyE'])doInteract();
-    if(keys['KeyU']&&!prevKeys['KeyU'])showUpgradeModal();
     for(const k in keys)prevKeys[k]=keys[k];
 
     if(fwd!==0||str!==0){
@@ -1115,16 +1130,11 @@
     if(exitMesh)exitMesh.rotation.y=t*1.1;
     const ring=scene.getObjectByName('exitRing'); if(ring)ring.material.opacity=0.3+0.25*Math.sin(t*2.5);
 
-    // Safehouse zone
-    const spawnPos=gw(1,1);
-    nearSafehouse=dist2(player.x,player.z,spawnPos.x,spawnPos.z)<SAFE_R;
-    const btnUpg=document.getElementById('btn-upgrade');
-    if(btnUpg)btnUpg.style.display=nearSafehouse?'flex':'none';
-    // Pulse safehouse light
+    // Safehouse visual pulse (decorative only during gameplay)
     const sl=scene.getObjectByName('safeLight');
-    if(sl)sl.intensity=1.2+0.5*Math.sin(t*2);
+    if(sl)sl.intensity=1.0+0.3*Math.sin(t*2);
     const sc=scene.getObjectByName('safeCircle');
-    if(sc)sc.material.opacity=nearSafehouse?0.35+0.12*Math.sin(t*3):0.12+0.04*Math.sin(t*2);
+    if(sc)sc.material.opacity=0.12+0.04*Math.sin(t*2);
 
     // Items bob + pickup
     worldItems=worldItems.filter(it=>!it.collected);
@@ -1142,9 +1152,8 @@
     for(const c of containers){
       if(!c.opened&&dist2(player.x,player.z,c.x,c.z)<INTERACT_R){nearContainer=c;break;}
     }
-    const showInteract=nearContainer&&!nearSafehouse;
-    $interactPrompt.style.display=showInteract?'block':'none';
-    document.getElementById('btn-interact').style.display=showInteract?'flex':'none';
+    $interactPrompt.style.display=nearContainer?'block':'none';
+    document.getElementById('btn-interact').style.display=nearContainer?'flex':'none';
 
     // Zombies
     for(let i=zombies.length-1;i>=0;i--){
@@ -1234,10 +1243,10 @@
     $healCount.textContent=`💊 ×${player.heals}`;
     $healCount.className=player.heals>0?'':'dim';
 
-    if($partsNum){$partsNum.textContent=player.parts; document.getElementById('parts-row').style.display=player.parts>0||nearSafehouse?'inline':'none';}
+    if($partsNum){$partsNum.textContent=player.parts; document.getElementById('parts-row').style.display=player.parts>0?'inline':'none';}
 
     const d=dist2(player.x,player.z,exitPos.x,exitPos.z);
-    $exitHint.textContent=nearSafehouse?'🏠 セーフハウス（[U]でアップグレード）':d<20?'🟢 出口が近い！':`🟢 出口まで約${Math.round(d)}m`;
+    $exitHint.textContent=d<20?'🟢 出口が近い！':`🟢 出口まで約${Math.round(d)}m`;
 
     document.getElementById('btn-attack').style.opacity=player.exhausted?'0.4':'1';
     document.getElementById('btn-fire').style.opacity=(player.gun&&player.gun.ammo>0)?'1':'0.35';
@@ -1272,7 +1281,8 @@
         🕐 <b style="color:#fff">${fmtTime(gameElapsed)}</b> &ensp;
         💀 <b style="color:#fff">${killCount}体</b> &ensp;
         ❤ <b style="color:#ff4">${Math.ceil(player.hp)}</b>
-      </span>`);
+      </span>
+      ${upgradeButtonHtml()}`);
   }
 
   function gameOver(){
@@ -1286,6 +1296,7 @@
       <p style="font-size:13px;color:#aaa;margin-top:10px">
         🕐 ${fmtTime(gameElapsed)} &nbsp;💀 ${killCount}体撃破
       </p>
+      ${upgradeButtonHtml()}
       <p style="font-size:12px;color:#777;margin-top:10px">セーフハウスに戻ります...</p>`;
     overlayAction='respawn';
     $oBtn.textContent='セーフハウスへ戻る';
@@ -1293,6 +1304,7 @@
     $overlay.style.display='flex';
     $hud.style.display='none';
     document.getElementById('action-buttons').style.display='none';
+    bindUpgradeBtn();
 
     // Auto-respawn after 3s
     clearTimeout(respawnTO);
