@@ -1,4 +1,4 @@
-const CACHE = 'zombie-escape-v6';
+const CACHE = 'zombie-escape-v7';
 const CORE = [
   './',
   './index.html',
