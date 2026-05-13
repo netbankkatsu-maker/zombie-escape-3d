@@ -150,6 +150,8 @@
   let overlayAction = 'start';
   let exhaustedNotified = false;
 
+  let cameraAngle = 0; // camera orbit angle (swipe / mouse)
+
   const keys = {}, prevKeys = {};
   let joy  = {on:false,id:-1,bx:0,by:0,dx:0,dy:0};
   let look = {on:false,id:-1,px:0};
@@ -408,6 +410,7 @@
     meleeCD=0; gunCD=0; healCD=0; nearContainer=null; nearWeaponItem=null;
     exhaustedNotified=false; nearSafehouse=false;
     killCount=0; gameStartTime=performance.now(); gameElapsed=0;
+    cameraAngle=0;
 
     let g;
     if(MODELS.player){
@@ -702,6 +705,7 @@
       killCount=data.kills||0;
       gameStartTime=performance.now()-(data.elapsed||0)*1000;
       gameElapsed=data.elapsed||0;
+      cameraAngle=data.player.angle||0;
       enterGame();
     } catch(err){
       $oTitle.textContent='ロードエラー';
@@ -765,7 +769,7 @@
     else if(overlayAction==='respawn') { clearTimeout(respawnTO); doRespawn(); }
     else showStart();
   }
-  function onMM(e){ if(state!=='playing')return; player.angle-=e.movementX*0.0028; }
+  function onMM(e){ if(state!=='playing')return; cameraAngle-=e.movementX*0.0028; }
 
   function onTS(e){
     if(state!=='playing')return;
@@ -792,7 +796,7 @@
         joy.dx=dx/len; joy.dy=dy/len;
         $knob.style.transform=`translate(calc(-50% + ${joy.dx*cl}px),calc(-50% + ${joy.dy*cl}px))`;
       }
-      if(t.identifier===look.id){e.preventDefault();player.angle-=(t.clientX-look.px)*0.0085;look.px=t.clientX;}
+      if(t.identifier===look.id){e.preventDefault();cameraAngle-=(t.clientX-look.px)*0.0085;look.px=t.clientX;}
     }
   }
   function onTE(e){
@@ -854,7 +858,8 @@
     swingTimer=0.14;
 
     const origin=new THREE.Vector3(player.x,1.2,player.z);
-    const fwd=new THREE.Vector3(-Math.sin(player.angle),0,-Math.cos(player.angle)).normalize();
+    // Shoot toward camera-facing direction so aiming matches the view
+    const fwd=new THREE.Vector3(-Math.sin(cameraAngle),0,-Math.cos(cameraAngle)).normalize();
     const baseDmg=eff.gunDmg(GUNS[player.gun.id].dmg);
     const range=GUNS[player.gun.id].range;
     const rays=[new THREE.Raycaster(origin,fwd,0,range)];
@@ -1092,12 +1097,15 @@
       if(player.exhausted&&player.stamina>ST_THRESH)player.exhausted=false;
     }
 
-    // Move
+    // Move input
     let fwd=0,str=0;
-    if(keys['KeyW']||keys['ArrowUp'])fwd+=1; if(keys['KeyS']||keys['ArrowDown'])fwd-=1;
+    if(keys['KeyW']||keys['ArrowUp'])   fwd+=1;
+    if(keys['KeyS']||keys['ArrowDown']) fwd-=1;
     if(keys['KeyA'])str-=1; if(keys['KeyD'])str+=1;
-    if(keys['ArrowLeft'])player.angle+=1.9*dt; if(keys['ArrowRight'])player.angle-=1.9*dt;
-    if(joy.on){fwd+=-joy.dy;str+=joy.dx;}
+    // Arrow left/right rotate camera
+    if(keys['ArrowLeft']) cameraAngle+=1.9*dt;
+    if(keys['ArrowRight'])cameraAngle-=1.9*dt;
+    if(joy.on){fwd+=-joy.dy; str+=joy.dx;}
     if(keys['Space']&&!prevKeys['Space'])doMelee();
     if(keys['KeyF']&&!prevKeys['KeyF'])doShoot();
     if(keys['KeyR']&&!prevKeys['KeyR'])doHeal();
@@ -1105,10 +1113,19 @@
     for(const k in keys)prevKeys[k]=keys[k];
 
     if(fwd!==0||str!==0){
-      const len=Math.sqrt(fwd*fwd+str*str)||1,nf=fwd/len,ns=str/len;
+      // World-space movement direction based on camera angle
+      const len=Math.sqrt(fwd*fwd+str*str)||1, nf=fwd/len, ns=str/len;
+      const sinC=Math.sin(cameraAngle), cosC=Math.cos(cameraAngle);
+      const wx=-sinC*nf+cosC*ns;   // world X
+      const wz=-cosC*nf-sinC*ns;   // world Z
+
+      // Rotate character to face movement direction (smooth)
+      const targetAngle=Math.atan2(-wx,-wz);
+      const diff=angleDiff(targetAngle,player.angle);
+      player.angle+=Math.sign(diff)*Math.min(Math.abs(diff),12*dt);
+
       const spd=(sprinting&&!player.exhausted)?eff.sprintSpd():eff.walkSpd();
-      const sinA=Math.sin(player.angle),cosA=Math.cos(player.angle);
-      tryMove(player,(-sinA*nf+cosA*ns)*spd*dt,(-cosA*nf-sinA*ns)*spd*dt,PLAYER_R);
+      tryMove(player,wx*spd*dt,wz*spd*dt,PLAYER_R);
     }
 
     // Player mesh tilt on swing
@@ -1118,11 +1135,11 @@
 
     const pl=scene.getObjectByName('pLight'); if(pl)pl.position.set(player.x,2.2,player.z);
 
-    // Camera
-    const sinA=Math.sin(player.angle),cosA=Math.cos(player.angle);
-    camera.position.x+=(player.x+sinA*CAM_DIST-camera.position.x)*CAM_LERP;
+    // Camera follows behind player based on cameraAngle (independent of player facing)
+    const sinC=Math.sin(cameraAngle), cosC=Math.cos(cameraAngle);
+    camera.position.x+=(player.x+sinC*CAM_DIST-camera.position.x)*CAM_LERP;
     camera.position.y+=(CAM_H-camera.position.y)*CAM_LERP;
-    camera.position.z+=(player.z+cosA*CAM_DIST-camera.position.z)*CAM_LERP;
+    camera.position.z+=(player.z+cosC*CAM_DIST-camera.position.z)*CAM_LERP;
     camera.lookAt(player.x,1.1,player.z);
 
     // Exit
