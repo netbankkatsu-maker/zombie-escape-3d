@@ -47,6 +47,7 @@ html, body {
 #hud-items .dim { color:#666; }
 
 #exit-hint { margin-top:5px; font-size:11px; color:rgba(0,255,80,0.85); text-shadow:0 0 8px #00ff44; }
+#hud-stats { margin-top:4px; font-size:11px; color:rgba(255,255,255,0.55); text-shadow:0 1px 3px #000; }
 
 #kb-hint {
   display:none; margin-top:4px; font-size:10px; color:rgba(255,255,255,0.3);

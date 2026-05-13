@@ -42,12 +42,73 @@
   const MODELS = {};
 
   // ================================================================
+  //  AUDIO
+  // ================================================================
+  let audioCtx = null;
+  function getAudioCtx() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+  }
+
+  function playTone(freq, type, dur, vol=0.18, attack=0.005, decay=0) {
+    try {
+      const ctx = getAudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.type = type; osc.frequency.setValueAtTime(freq, ctx.currentTime);
+      gain.gain.setValueAtTime(0, ctx.currentTime);
+      gain.gain.linearRampToValueAtTime(vol, ctx.currentTime + attack);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+      if (decay > 0) osc.frequency.exponentialRampToValueAtTime(freq * decay, ctx.currentTime + dur);
+      osc.start(ctx.currentTime); osc.stop(ctx.currentTime + dur);
+    } catch(_) {}
+  }
+
+  function playNoise(dur, vol=0.12, hpFreq=800) {
+    try {
+      const ctx = getAudioCtx();
+      const buf = ctx.createBuffer(1, ctx.sampleRate * dur, ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'highpass'; filter.frequency.value = hpFreq;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(vol, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+      src.connect(filter); filter.connect(gain); gain.connect(ctx.destination);
+      src.start(); src.stop(ctx.currentTime + dur);
+    } catch(_) {}
+  }
+
+  const SFX = {
+    shoot()   { playNoise(0.12, 0.25, 1200); playTone(180, 'sawtooth', 0.08, 0.12, 0.002, 0.3); },
+    shotgun() { playNoise(0.22, 0.35, 600);  playTone(90,  'sawtooth', 0.14, 0.18, 0.002, 0.25); },
+    melee()   { playNoise(0.06, 0.22, 300);  playTone(220, 'square',   0.05, 0.08); },
+    hit()     { playTone(160, 'sawtooth', 0.18, 0.2, 0.002, 0.3); playNoise(0.1, 0.15, 200); },
+    pickup()  { playTone(880, 'sine', 0.06, 0.1); playTone(1100, 'sine', 0.08, 0.1); },
+    heal()    { [440,550,660].forEach((f,i) => setTimeout(() => playTone(f,'sine',0.12,0.1), i*60)); },
+    open()    { playNoise(0.08, 0.18, 150); playTone(320, 'triangle', 0.1, 0.09); },
+    zombie()  { playTone(140 + Math.random()*40, 'sawtooth', 0.28, 0.08, 0.01, 0.7); },
+    die()     { playTone(200, 'sawtooth', 0.4, 0.12, 0.01, 0.2); playNoise(0.3, 0.1, 100); },
+    gameover(){ [330,220,180,110].forEach((f,i) => setTimeout(() => playTone(f,'sawtooth',0.3,0.12),i*200)); },
+    win()     { [440,550,660,880].forEach((f,i) => setTimeout(() => playTone(f,'sine',0.25,0.15),i*120)); },
+    empty()   { playTone(440, 'square', 0.05, 0.07); playTone(380, 'square', 0.05, 0.07); },
+  };
+
+  // ================================================================
   //  STATE
   // ================================================================
   let renderer, scene, camera, clock;
   let state = 'start';
   let grid = [];
   let exitPos = { x:0, z:0 }, exitMesh = null;
+
+  // ---- Stats ----
+  let killCount = 0, gameStartTime = 0, gameElapsed = 0;
 
   const player = {
     x:0, z:0, angle:0, mesh:null,
@@ -67,7 +128,7 @@
   let look = { on:false, id:-1, px:0 };
 
   let $canvas,$hud,$hpFill,$hpNum,$stFill,$stNum;
-  let $weaponInfo,$gunInfo,$healCount,$exitHint;
+  let $weaponInfo,$gunInfo,$healCount,$exitHint,$timerNum,$killNum;
   let $overlay,$oTitle,$oBody,$oBtn;
   let $joy,$knob,$flash,$muzzle;
   let $interactPrompt,$pickupNotif,$swapPrompt,$swapText;
@@ -98,6 +159,8 @@
     $pickupNotif    = document.getElementById('pickup-notif');
     $swapPrompt     = document.getElementById('swap-prompt');
     $swapText       = document.getElementById('swap-text');
+    $timerNum       = document.getElementById('timer-num');
+    $killNum        = document.getElementById('kill-num');
 
     initRenderer();
     setupInput();
@@ -299,6 +362,7 @@
     player.melee={...MELEE.fists,id:'fists'}; player.gun=null; player.heals=0;
     meleeCD=0; gunCD=0; healCD=0; nearContainer=null; nearWeaponItem=null;
     exhaustedNotified=false;
+    killCount=0; gameStartTime=performance.now(); gameElapsed=0;
 
     let g;
     if (MODELS.player) {
@@ -603,14 +667,17 @@
     if(player.stamina<player.melee.st&&player.melee.id!=='fists'){notify('スタミナ不足！');return;}
     player.stamina=Math.max(0,player.stamina-player.melee.st);
     meleeCD=player.melee.cd;
+    SFX.melee();
+    let meleeHit = false;
     for(let i=zombies.length-1;i>=0;i--){
       const z=zombies[i];
       const d=dist2(player.x,player.z,z.x,z.z);
       if(d>player.melee.range)continue;
       if(Math.abs(angleDiff(Math.atan2(z.x-player.x,z.z-player.z),player.angle))>player.melee.arc/2)continue;
-      z.hp-=player.melee.dmg; z.flashTimer=0.18;
+      z.hp-=player.melee.dmg; z.flashTimer=0.18; meleeHit=true;
       if(z.hp<=0)killZombie(i);
     }
+    if(meleeHit) setTimeout(()=>SFX.hit(), 40);
     flashMuzzle('rgba(255,200,50,0.3)',120);
     updateHUD();
   }
@@ -618,8 +685,9 @@
   function doShoot(){
     if(state!=='playing')return;
     if(!player.gun||gunCD>0)return;
-    if(player.gun.ammo<=0){notify('弾切れ！');return;}
+    if(player.gun.ammo<=0){notify('弾切れ！');SFX.empty();return;}
     player.gun.ammo--; gunCD=GUNS[player.gun.id].fireCd;
+    (player.gun.id==='shotgun'?SFX.shotgun:SFX.shoot)();
     const origin=new THREE.Vector3(player.x,1.2,player.z);
     const fwd=new THREE.Vector3(-Math.sin(player.angle),0,-Math.cos(player.angle)).normalize();
     const rays=[new THREE.Raycaster(origin,fwd,0,GUNS[player.gun.id].range)];
@@ -650,12 +718,16 @@
     if(player.hp>=HP_MAX){notify('HPは満タン！');return;}
     player.heals--; healCD=1.5;
     player.hp=Math.min(HP_MAX,player.hp+40);
-    notify('💊 HP +40 回復'); updateHUD();
+    SFX.heal(); notify('💊 HP +40 回復'); updateHUD();
   }
 
   function killZombie(idx){
     scene.remove(zombies[idx].mesh); zombies.splice(idx,1);
-    notify(zombies.length===0?'🎉 全ゾンビ撃破！出口を目指せ！':'ゾンビを倒した！');
+    killCount++;
+    SFX.die();
+    // Random zombie groan on nearby zombies
+    if(zombies.length>0 && Math.random()<0.4) setTimeout(()=>SFX.zombie(), 200+Math.random()*300);
+    notify(zombies.length===0?'🎉 全ゾンビ撃破！出口を目指せ！':`ゾンビを倒した！(${killCount}体目)`);
   }
 
   function flashMuzzle(bg,ms){
@@ -678,6 +750,7 @@
       if(ch.isMesh&&ch.material&&!ch.material.wireframe)
         ch.material.color.multiplyScalar(0.4);
     });
+    SFX.open();
     const loot=rollCrate(c.type);
     loot.forEach(itm=>{
       const ox=(Math.random()-0.5)*CELL*0.55,oz=(Math.random()-0.5)*CELL*0.55;
@@ -691,25 +764,25 @@
     item.collected=true; scene.remove(item.mesh);
     switch(item.type){
       case 'heal':
-        player.heals++; notify(`💊 回復アイテム入手！(×${player.heals})`); break;
+        player.heals++; SFX.pickup(); notify(`💊 回復アイテム入手！(×${player.heals})`); break;
       case 'ammo':
         if(player.gun){
           const max=GUNS[player.gun.id].maxAmmo;
           player.gun.ammo=Math.min(max,player.gun.ammo+item.amount);
-          notify(`🔫 弾薬 +${item.amount}（残弾:${player.gun.ammo}）`);
-        } else notify(`弾薬を拾った（銃がない）`);
+          SFX.pickup(); notify(`🔫 弾薬 +${item.amount}（残弾:${player.gun.ammo}）`);
+        } else { SFX.pickup(); notify(`弾薬を拾った（銃がない）`); }
         break;
       case 'melee':{
         const def=MELEE[item.sub];
         if(player.melee.id==='fists'||def.dmg>player.melee.dmg){
-          player.melee={...def,id:item.sub}; notify(`⚔ ${def.name}を装備！`);
+          player.melee={...def,id:item.sub}; SFX.pickup(); notify(`⚔ ${def.name}を装備！`);
         } else { showSwapPrompt(item); return; }
         break;
       }
       case 'gun':
         if(!player.gun){
           player.gun={...GUNS[item.sub],id:item.sub,ammo:item.ammo};
-          notify(`🔫 ${GUNS[item.sub].name}入手！(弾${item.ammo}発)`);
+          SFX.pickup(); notify(`🔫 ${GUNS[item.sub].name}入手！(弾${item.ammo}発)`);
         } else { showSwapPrompt(item); return; }
         break;
     }
@@ -730,6 +803,7 @@
     if(!nearWeaponItem||!yes){nearWeaponItem=null;return;}
     const item=nearWeaponItem; nearWeaponItem=null;
     item.collected=true; scene.remove(item.mesh);
+    SFX.pickup();
     if(item.type==='gun'){
       player.gun={...GUNS[item.sub],id:item.sub,ammo:item.ammo};
       notify(`🔫 ${GUNS[item.sub].name}に交換！`);
@@ -752,6 +826,7 @@
 
   function update(dt){
     const now=performance.now(), t=now*0.001;
+    gameElapsed = (now - gameStartTime) * 0.001;
     if(meleeCD>0)meleeCD-=dt; if(gunCD>0)gunCD-=dt; if(healCD>0)healCD-=dt;
 
     // ---- Stamina ----
@@ -837,7 +912,7 @@
       z.mesh.position.set(z.x,0,z.z); z.mesh.rotation.y=z.angle;
       if(d<1.15){
         player.hp-=D.zDmg*dt;
-        if(now-z.lastDmg>450){z.lastDmg=now;flashDamage();}
+        if(now-z.lastDmg>450){z.lastDmg=now;flashDamage();SFX.hit();if(Math.random()<0.5)SFX.zombie();}
       }
     }
 
@@ -876,7 +951,13 @@
     document.getElementById('btn-attack').style.opacity=player.exhausted?'0.4':'1';
     document.getElementById('btn-fire').style.opacity=(player.gun&&player.gun.ammo>0)?'1':'0.35';
     document.getElementById('btn-heal').style.opacity=player.heals>0?'1':'0.35';
+
+    if($timerNum) $timerNum.textContent = fmtTime(gameElapsed);
+    if($killNum)  $killNum.textContent  = killCount;
   }
+
+  function fmtTime(s){const m=Math.floor(s/60),sec=Math.floor(s%60);return`${m}:${String(sec).padStart(2,'0')}`;}
+
 
   let fTO=null;
   function flashDamage(){$flash.style.opacity='1';clearTimeout(fTO);fTO=setTimeout(()=>$flash.style.opacity='0',380);}
@@ -886,7 +967,24 @@
   // ================================================================
   //  WIN / GAMEOVER
   // ================================================================
-  function winGame(){state='win';showResult('🎉 脱出成功！','ゾンビから逃げ切った！<br>おめでとう！');}
-  function gameOver(){state='gameover';showResult('💀 ゲームオーバー','ゾンビにやられた…<br>次は逃げ切れるか？');}
+  function winGame(){
+    state='win'; SFX.win();
+    showResult('🎉 脱出成功！',
+      `ゾンビから逃げ切った！<br>
+      <span style="font-size:13px;color:#aaa">
+        🕐 生存時間: <b style="color:#fff">${fmtTime(gameElapsed)}</b>&ensp;
+        💀 撃破数: <b style="color:#fff">${killCount}体</b>&ensp;
+        ❤ 残りHP: <b style="color:#ff4">${Math.ceil(player.hp)}</b>
+      </span>`);
+  }
+  function gameOver(){
+    state='gameover'; SFX.gameover();
+    showResult('💀 ゲームオーバー',
+      `ゾンビにやられた…<br>
+      <span style="font-size:13px;color:#aaa">
+        🕐 生存時間: <b style="color:#fff">${fmtTime(gameElapsed)}</b>&ensp;
+        💀 撃破数: <b style="color:#fff">${killCount}体</b>
+      </span>`);
+  }
 
 })();
