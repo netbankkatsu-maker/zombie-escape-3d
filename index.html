@@ -20,7 +20,6 @@
 
   <!-- Overlays -->
   <div id="damage-flash"></div>
-  <div id="muzzle-flash"></div>
 
   <!-- HUD -->
   <div id="hud">
@@ -40,17 +39,18 @@
       <span id="weapon-info">⚔ 素手</span>
       <span id="gun-info" class="dim">🔫 なし</span>
       <span id="heal-count" class="dim">💊 ×0</span>
+      <span id="parts-row" style="display:none;color:#ff9900">🔧 ×<span id="parts-num">0</span></span>
     </div>
     <div id="exit-hint">🟢 出口を目指せ！</div>
     <div id="hud-stats">🕐 <span id="timer-num">0:00</span> &nbsp; 💀 <span id="kill-num">0</span></div>
     <!-- PC hint -->
-    <div id="kb-hint">[Space]ATK &nbsp; [F]FIRE &nbsp; [R]HEAL &nbsp; [E]OPEN &nbsp; [Shift]走る</div>
+    <div id="kb-hint">[Space]ATK &nbsp; [F]FIRE &nbsp; [R]HEAL &nbsp; [E]OPEN &nbsp; [U]UPGRADE &nbsp; [Shift]走る</div>
   </div>
 
-  <!-- Pickup toast -->
+  <!-- Pickup toast (bottom-left) -->
   <div id="pickup-notif"></div>
 
-  <!-- Interact prompt (near container) -->
+  <!-- Interact prompt -->
   <div id="interact-prompt">📦 <b>OPEN</b> をタップ / <kbd>E</kbd></div>
 
   <!-- Weapon swap modal -->
@@ -62,8 +62,21 @@
     </div>
   </div>
 
+  <!-- Upgrade modal -->
+  <div id="upgrade-modal">
+    <div id="upgrade-panel">
+      <div id="upgrade-header">
+        <span>🏠 セーフハウス — アップグレード</span>
+        <span id="upgrade-parts-info">🔧 資材: <b id="upgrade-parts">0</b></span>
+      </div>
+      <div id="upgrade-list"></div>
+      <button id="btn-upgrade-close">閉じる</button>
+    </div>
+  </div>
+
   <!-- Action buttons (bottom right) -->
   <div id="action-buttons">
+    <button id="btn-upgrade" class="abtn upgrade-abtn" style="display:none">🏠<br><small>UPG</small></button>
     <button id="btn-interact" class="abtn interact-abtn" style="display:none">📦<br><small>OPEN</small></button>
     <button id="btn-heal" class="abtn">💊<br><small>HEAL</small></button>
     <button id="btn-fire" class="abtn">🔫<br><small>FIRE</small></button>
