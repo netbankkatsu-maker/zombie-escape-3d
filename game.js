@@ -146,6 +146,13 @@
     pickup()  { playTone(880,'sine',0.06,0.1); playTone(1100,'sine',0.08,0.1); },
     heal()    { [440,550,660].forEach((f,i)=>setTimeout(()=>playTone(f,'sine',0.12,0.1),i*60)); },
     open()    { playNoise(0.08,0.18,150); playTone(320,'triangle',0.1,0.09); },
+    rummage() {
+      // Rummaging-through-box sound: multiple noise bursts + low clunk
+      playNoise(0.14,0.20,500); playTone(130,'triangle',0.06,0.04);
+      setTimeout(()=>playNoise(0.10,0.16,350),180);
+      setTimeout(()=>playNoise(0.09,0.13,420),400);
+    },
+    itemFound(){ playTone(660,'sine',0.08,0.12); setTimeout(()=>playTone(880,'sine',0.07,0.10),65); },
     upgrade() { [440,660,880,1100].forEach((f,i)=>setTimeout(()=>playTone(f,'sine',0.15,0.12),i*80)); },
     zombie()  { playTone(140+Math.random()*40,'sawtooth',0.28,0.08,0.01,0.7); },
     die()     { playTone(200,'sawtooth',0.4,0.12,0.01,0.2); playNoise(0.3,0.1,100); },
@@ -189,6 +196,11 @@
   let bullets = [];          // flying bullet objects
   let lockTarget = null;     // zombie currently locked-on
   let lockMesh  = null;      // 3-D lock indicator mesh
+  // Shared bullet geometry/materials — avoids GC pressure on every shot
+  const _bGeoS = new THREE.SphereGeometry(0.07,4,4); // shotgun pellet
+  const _bGeoP = new THREE.SphereGeometry(0.06,4,4); // pistol bullet
+  const _bMatY = new THREE.MeshBasicMaterial({color:0xffee00}); // pistol (yellow)
+  const _bMatO = new THREE.MeshBasicMaterial({color:0xff8800}); // shotgun (orange)
   let overlayAction = 'start';
   let exhaustedNotified = false;
 
@@ -761,13 +773,15 @@
       const mat=new THREE.MeshStandardMaterial({color:col,emissive:col,emissiveIntensity:0.22,roughness:0.5,metalness:0.3});
       g.add(new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat));
     }
-    const gl=new THREE.PointLight(gcol,0.7,3.5); gl.position.y=0.2; g.add(gl);
+    // No per-item PointLight — emissive material provides the glow effect
+    // without the heavy per-light GPU cost (20+ lights were killing performance)
     return g;
   }
 
   function createItem(type,sub,amount,ammo,x,z){
     const mesh=makeItemMesh(type,sub); mesh.position.set(x,0.5,z); scene.add(mesh);
     worldItems.push({type,sub,amount:amount||0,ammo:ammo||0,x,z,mesh,collected:false,bob:Math.random()*Math.PI*2});
+    invalidateNearbyPanel();
   }
   function randomMeleeSub(){const r=Math.random();return r<0.5?'bat':r<0.8?'pipe':'axe';}
   function randomAmmo(id){const max=GUNS[id].maxAmmo;return Math.max(1,Math.round(max*(Math.random()<0.05?1:Math.random()*0.85+0.05)));}
@@ -924,7 +938,7 @@
     const ox=(Math.random()-0.5)*2.0, oz=(Math.random()-0.5)*2.0;
     createItem(item.type,item.sub,item.amount,item.ammo,player.x+ox,player.z+oz);
     notify(`${ITEM_ICONS[item.sub]||'📦'} ${ITEM_NAMES[item.sub]||item.sub}を捨てた`);
-    updateHUD();
+    updateHUD(true);
   }
 
   // Equip weapon from inventory
@@ -944,7 +958,7 @@
       player.gun={...GUNS[item.sub],id:item.sub,ammo:item.ammo};
       notify(`🔫 ${GUNS[item.sub].name}を装備！`);
     }
-    SFX.pickup(); updateHUD(); if(invOpen)renderInvUI();
+    SFX.pickup(); updateHUD(true); if(invOpen)renderInvUI();
   }
 
   // Use consumable from inventory
@@ -959,7 +973,7 @@
       item.amount--;
       if(item.amount<=0)invRemove(id);
       SFX.heal(); notify(`💊 HP +${healAmt} 回復`);
-      updateHUD(); if(invOpen)renderInvUI();
+      updateHUD(true); if(invOpen)renderInvUI();
     } else if(item.type==='ammo'){
       if(!player.gun){notify('銃がない！');return;}
       const gunSub=item.sub.replace('_ammo','');
@@ -970,7 +984,7 @@
       player.gun.ammo+=add; item.amount-=add;
       if(item.amount<=0)invRemove(id);
       notify(`🔫 弾薬 +${add}（残弾:${player.gun.ammo}）`);
-      SFX.pickup(); updateHUD(); if(invOpen)renderInvUI();
+      SFX.pickup(); updateHUD(true); if(invOpen)renderInvUI();
     }
   }
 
@@ -992,6 +1006,7 @@
     worldItem.collected=true;
     scene.remove(worldItem.mesh);
     worldItems=worldItems.filter(i=>!i.collected);
+    invalidateNearbyPanel();
 
     const icon=ITEM_ICONS[worldItem.sub]||'📦';
     const name=ITEM_NAMES[worldItem.sub]||worldItem.sub;
@@ -1006,7 +1021,7 @@
           const rem=worldItem.amount-add;
           if(rem>0)invAdd('ammo',worldItem.sub,rem,0);
           notify(`${icon} 弾薬 +${add}`);
-          SFX.pickup(); updateHUD(); return;
+          SFX.pickup(); updateHUD(true); return;
         }
       }
       if(!invAdd('ammo',worldItem.sub,worldItem.amount,0))
@@ -1045,21 +1060,26 @@
         else { SFX.pickup(); notify(`${icon} ${name}をバッグに入れた`); }
       }
     }
-    updateHUD();
+    updateHUD(true);
   }
 
   // ── Nearby items panel ──
+  let _nearbyPanelKey = '';
   function renderNearbyPanel(){
     if(!$nearbyPanel)return;
-    if(invOpen){ $nearbyPanel.style.display='none'; return; }
+    if(invOpen){ $nearbyPanel.style.display='none'; _nearbyPanelKey=''; return; }
 
-    nearbyWorldItems=worldItems.filter(it=>!it.collected&&dist2(player.x,player.z,it.x,it.z)<PICKUP_R);
+    const nearby=worldItems.filter(it=>!it.collected&&dist2(player.x,player.z,it.x,it.z)<PICKUP_R);
+    // Build a stable key — only re-render DOM when the list actually changes
+    const newKey=nearby.length===0?'':nearby.map(it=>it.mesh.uuid).join(',');
+    if(newKey===_nearbyPanelKey){ nearbyWorldItems=nearby; return; } // no change
+    _nearbyPanelKey=newKey;
+    nearbyWorldItems=nearby;
 
-    if(nearbyWorldItems.length===0){
-      $nearbyPanel.style.display='none'; return;
-    }
+    if(nearby.length===0){ $nearbyPanel.style.display='none'; return; }
+
     $nearbyPanel.style.display='block';
-    $nearbyPanel.innerHTML=nearbyWorldItems.map((it,i)=>{
+    $nearbyPanel.innerHTML=nearby.map((it,i)=>{
       const icon=ITEM_ICONS[it.sub]||'📦';
       const name=ITEM_NAMES[it.sub]||it.sub;
       const info=it.type==='gun'?` (${it.ammo}発)`:
@@ -1074,6 +1094,8 @@
       el.addEventListener('touchend',e=>{e.preventDefault();doPickup();});
     });
   }
+  // Called whenever worldItems list changes — forces a panel refresh next frame
+  function invalidateNearbyPanel(){ _nearbyPanelKey=''; }
 
   // ── Inventory UI ──
   const INV_CELL=58, INV_GAP=3, INV_PAD=4;
@@ -1149,7 +1171,7 @@
       btnUnequipGun.onclick=()=>{
         if(!player.gun)return;
         if(invAdd('gun',player.gun.id,1,player.gun.ammo)){
-          player.gun=null; updateHUD(); renderInvUI();
+          player.gun=null; updateHUD(true); renderInvUI();
           notify('銃をバッグにしまった');
         } else notify('インベントリがいっぱい！');
       };
@@ -1160,7 +1182,7 @@
       btnUnequipMelee.onclick=()=>{
         if(player.melee.id==='fists')return;
         if(invAdd('melee',player.melee.id,1,0)){
-          player.melee={...MELEE.fists,id:'fists'}; updateHUD(); renderInvUI();
+          player.melee={...MELEE.fists,id:'fists'}; updateHUD(true); renderInvUI();
           notify('武器をバッグにしまった');
         } else notify('インベントリがいっぱい！');
       };
@@ -1256,7 +1278,7 @@
     state='playing';
     $overlay.style.display='none'; $hud.style.display='block';
     document.getElementById('action-buttons').style.display='flex';
-    updateHUD();
+    updateHUD(true);
   }
 
   function startGame(){
@@ -1345,6 +1367,11 @@
     addBtn('btn-fire',()=>doShoot());
     addBtn('btn-heal',()=>doHeal());
     addBtn('btn-interact',()=>doInteract());
+    // Also make the interact-prompt overlay itself tappable
+    if($interactPrompt){
+      $interactPrompt.addEventListener('click',()=>doInteract());
+      $interactPrompt.addEventListener('touchend',e=>{e.preventDefault();doInteract();});
+    }
     addBtn('btn-inv',()=>{if(invOpen)closeInv();else openInv();});
 
     document.getElementById('btn-upgrade-close')
@@ -1451,7 +1478,7 @@
       if(z.hp<=0)killZombie(i);
     }
     if(hit) setTimeout(()=>SFX.hit(),40);
-    updateHUD();
+    updateHUD(true);
   }
 
   function addSwingArc(){
@@ -1504,15 +1531,14 @@
     for(const p of pellets){
       const len=Math.sqrt(p.dx*p.dx+p.dz*p.dz)||1;
       const ndx=p.dx/len, ndz=p.dz/len;
-      const geo=new THREE.SphereGeometry(isShotgun?0.07:0.06,4,4);
-      const mat=new THREE.MeshBasicMaterial({color:bulletColor});
-      const mesh=new THREE.Mesh(geo,mat);
+      // Use shared geo/mat to avoid per-shot GC allocations
+      const mesh=new THREE.Mesh(isShotgun?_bGeoS:_bGeoP, isShotgun?_bMatO:_bMatY);
       mesh.position.set(player.x,1.15,player.z);
       scene.add(mesh);
       bullets.push({mesh,x:player.x,z:player.z,dx:ndx,dz:ndz,
                     spd:bulletSpd,distLeft:range,dmg:baseDmg,gunId,hitOnce:!isShotgun});
     }
-    updateHUD();
+    updateHUD(true);
   }
 
   function doHeal(){
@@ -1539,22 +1565,52 @@
   // ================================================================
   function doInteract(){
     if(state!=='playing')return;
-    if(nearContainer&&!nearContainer.opened) openContainer(nearContainer);
+    // Allow interact even while another container is opening
+    if(nearContainer&&!nearContainer.opened&&!nearContainer.opening)
+      openContainer(nearContainer);
   }
 
   function openContainer(c){
     c.opened=true;
+    c.opening=true; // prevent re-triggering
     c.mesh.traverse(ch=>{
       if(ch.isMesh&&ch.material&&!ch.material.wireframe)ch.material.color.multiplyScalar(0.4);
     });
-    SFX.open();
+    nearContainer=null;
+    $interactPrompt.style.display='none';
+    document.getElementById('btn-interact').style.display='none';
+
     const loot=rollCrate(c.type);
-    loot.forEach(itm=>{
-      const ox=(Math.random()-0.5)*CELL*0.55,oz=(Math.random()-0.5)*CELL*0.55;
-      createItem(itm.type,itm.sub,itm.amount||0,itm.ammo||0,c.x+ox,c.z+oz);
+    if(loot.length===0){ SFX.open(); notify('📦 空だった…'); return; }
+
+    const label=c.type==='locker'?'ロッカー':'箱';
+
+    // Initial rummage sound + "searching..." message
+    SFX.rummage();
+    notify(`🔍 ${label}を漁っている…`);
+
+    // Item timing:
+    //   items 0..(n-2): appear every 1 s  →  delay = (idx+1)*1000 ms
+    //   item  (n-1)   : last item, 3 s after the previous one
+    loot.forEach((itm,idx)=>{
+      const isLast=idx===loot.length-1;
+      const delay=isLast ? idx*1000+3000 : (idx+1)*1000;
+
+      // Play an extra rummage just before each item drops
+      const rumbleAt=Math.max(0,delay-600);
+      setTimeout(()=>{if(state==='playing')SFX.rummage();},rumbleAt);
+
+      setTimeout(()=>{
+        if(state!=='playing')return;
+        const ox=(Math.random()-0.5)*CELL*0.55,oz=(Math.random()-0.5)*CELL*0.55;
+        createItem(itm.type,itm.sub,itm.amount||0,itm.ammo||0,c.x+ox,c.z+oz);
+        SFX.itemFound();
+        const icon=ITEM_ICONS[itm.sub]||'📦';
+        const name=ITEM_NAMES[itm.sub]||itm.sub;
+        const amtStr=itm.type==='gun'?` (${itm.ammo}発)`:itm.amount>1?` ×${itm.amount}`:'';
+        notify(`${icon} ${name}${amtStr}が出てきた！${isLast?'（完了）':''}`);
+      },delay);
     });
-    notify(loot.length>0?`📦 ${c.type==='locker'?'ロッカー':'箱'}を開けた！(${loot.length}個)`:`📦 空だった…`);
-    nearContainer=null; $interactPrompt.style.display='none';
   }
 
   // ================================================================
@@ -1585,6 +1641,8 @@
   }
   function closeUpgradeModal(){
     $upgradeModal.style.display='none';
+    // Refresh start screen so parts count / upgrade list stay in sync
+    if(state==='start') showStart();
   }
 
   function renderUpgradeModal(){
@@ -1636,7 +1694,7 @@
     if(id==='hpUp')   player.hp=Math.min(eff.hpMax(),player.hp+20);
     if(id==='stUp')   player.stamina=Math.min(eff.stMax(),player.stamina+15);
     renderUpgradeModal();
-    updateHUD();
+    updateHUD(true);
   }
 
   // ================================================================
@@ -1785,7 +1843,7 @@
       b.mesh.position.set(b.x,1.15,b.z);
       // Wall collision
       if(hitsWall(b.x,b.z,0.1)){
-        scene.remove(b.mesh); b.mesh.geometry.dispose(); b.mesh.material.dispose();
+        scene.remove(b.mesh);
         bullets.splice(bi,1); continue;
       }
       // Zombie hit
@@ -1797,7 +1855,7 @@
           SFX.hit();
           if(z.hp<=0)killZombie(zi);
           if(b.hitOnce){
-            scene.remove(b.mesh); b.mesh.geometry.dispose(); b.mesh.material.dispose();
+            scene.remove(b.mesh);
             bullets.splice(bi,1); removed=true; break;
           }
         }
@@ -1805,7 +1863,7 @@
       if(removed)continue;
       // Range exhausted
       if(b.distLeft<=0){
-        scene.remove(b.mesh); b.mesh.geometry.dispose(); b.mesh.material.dispose();
+        scene.remove(b.mesh);
         bullets.splice(bi,1);
       }
     }
@@ -1816,10 +1874,12 @@
 
       if(z.flashTimer>0){
         z.flashTimer-=dt;
+        const flashOn=z.flashTimer>0;
+        // traverse only runs while flash is active (was running every frame for all zombies)
         z.mesh.traverse(c=>{
           if(c.isMesh&&c.material&&c.material.emissive){
-            c.material.emissive.setHex(z.flashTimer>0?0xff0000:0x000000);
-            c.material.emissiveIntensity=z.flashTimer>0?0.8:0;
+            c.material.emissive.setHex(flashOn?0xff0000:0x000000);
+            c.material.emissiveIntensity=flashOn?0.8:0;
           }
         });
       }
@@ -1858,7 +1918,7 @@
     }
 
     player.hp=Math.max(0,player.hp);
-    updateHUD();
+    updateHUD(); // throttled to 30fps in the game loop
 
     saveTimer-=dt;
     if(saveTimer<=0){saveTimer=5;saveRun();}
@@ -1871,7 +1931,11 @@
   // ================================================================
   function fmtTime(s){const m=Math.floor(s/60),sec=Math.floor(s%60);return`${m}:${String(sec).padStart(2,'0')}`;}
 
-  function updateHUD(){
+  let _hudLast=0;
+  function updateHUD(force=false){
+    const now2=performance.now();
+    if(!force&&state==='playing'&&now2-_hudLast<33)return; // 30fps cap for DOM updates
+    _hudLast=now2;
     const hpPct=player.hp/eff.hpMax()*100;
     $hpFill.style.width=hpPct+'%';
     $hpFill.style.background=hpPct>60?'#00e855':hpPct>30?'#ffaa00':'#ff2222';
@@ -1936,7 +2000,25 @@
         💀 <b style="color:#fff">${killCount}体</b> &ensp;
         ❤ <b style="color:#ff4">${Math.ceil(player.hp)}</b>
       </span>
-      ${upgradeButtonHtml()}`);
+      ${upgradeButtonHtml()}
+      <div style="margin-top:8px">
+        <button id="btn-win-newgame" style="padding:10px 28px;border:2px solid rgba(0,255,100,0.6);
+          border-radius:30px;background:rgba(0,80,30,0.7);color:#88ffaa;font-size:14px;
+          font-weight:bold;cursor:pointer;-webkit-tap-highlight-color:transparent;">
+          ▶ ニューゲームへ
+        </button>
+      </div>`);
+    // Override main button to go to start screen (shows difficulty + upgrade)
+    overlayAction='menu';
+    $oBtn.textContent='メニューへ';
+    // Bind the quick new-game button
+    setTimeout(()=>{
+      const bng=document.getElementById('btn-win-newgame');
+      if(bng){
+        bng.addEventListener('click',()=>showStart());
+        bng.addEventListener('touchend',e=>{e.preventDefault();showStart();});
+      }
+    },0);
   }
 
   function gameOver(){
@@ -1976,7 +2058,7 @@
 
   function respawnAtSafehouse(){
     // Clear any in-flight bullets
-    bullets.forEach(b=>{scene.remove(b.mesh);b.mesh.geometry.dispose();b.mesh.material.dispose();});
+    bullets.forEach(b=>scene.remove(b.mesh));
     bullets=[]; lockTarget=null; if(lockMesh)lockMesh.visible=false;
 
     const ps=gw(1,1);
@@ -1998,7 +2080,7 @@
     spawnZombies();
 
     state='playing';
-    updateHUD();
+    updateHUD(true);
     notify('🏠 セーフハウスに帰還。アイテムロスト（資材は持越し）');
     saveRun();
   }

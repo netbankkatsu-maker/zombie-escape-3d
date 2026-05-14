@@ -66,7 +66,8 @@ html, body {
   display:none; position:fixed; bottom:130px; left:50%; transform:translateX(-50%);
   background:rgba(0,0,0,0.7); color:#fff;
   padding:9px 22px; border-radius:20px; font-size:13px;
-  border:1px solid rgba(255,255,100,0.5); z-index:25; pointer-events:none;
+  border:1px solid rgba(255,255,100,0.5); z-index:25;
+  cursor:pointer; -webkit-tap-highlight-color:transparent;
   text-align:center; animation: pulse-border 1.5s infinite;
 }
 #interact-prompt kbd {
@@ -362,7 +363,7 @@ html, body {
   #overlay-body  { font-size:12px; }
   #overlay-btn   { padding:12px 36px; font-size:15px; }
 
-  #upgrade-panel { padding:14px; max-width:440px; }
+  #upgrade-panel { padding:14px; max-width:440px; overflow-y:auto; max-height:calc(100dvh - 32px); }
   #upgrade-list  { gap:7px; }
   .upg-row { padding:8px 10px; }
 
