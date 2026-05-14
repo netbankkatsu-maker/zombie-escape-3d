@@ -186,6 +186,9 @@
   let zombies = [], worldItems = [], containers = [];
   let nearContainer = null;
   let meleeCD = 0, gunCD = 0, healCD = 0;
+  let bullets = [];          // flying bullet objects
+  let lockTarget = null;     // zombie currently locked-on
+  let lockMesh  = null;      // 3-D lock indicator mesh
   let overlayAction = 'start';
   let exhaustedNotified = false;
 
@@ -522,6 +525,8 @@
       }
     });
     while(scene.children.length) scene.remove(scene.children[0]);
+    // Clean up bullets from previous run
+    bullets=[]; lockTarget=null; lockMesh=null;
     worldItems=[]; containers=[];
     swingMesh=null;
 
@@ -601,6 +606,23 @@
     );
     safeCircle.rotation.x=-Math.PI/2; safeCircle.position.set(sp.x,0.01,sp.z); safeCircle.name='safeCircle'; scene.add(safeCircle);
     const safeLight=new THREE.PointLight(0x00aaff,1.0,8); safeLight.position.set(sp.x,1.8,sp.z); safeLight.name='safeLight'; scene.add(safeLight);
+
+    // ── Lock-on indicator (reticle that hovers above locked zombie) ──
+    const lockGeo=new THREE.RingGeometry(0.30,0.42,16);
+    const lockMat=new THREE.MeshBasicMaterial({color:0xff3300,transparent:true,opacity:0.92,side:THREE.DoubleSide,depthWrite:false});
+    lockMesh=new THREE.Mesh(lockGeo,lockMat);
+    lockMesh.rotation.x=-Math.PI/2;
+    lockMesh.visible=false;
+    scene.add(lockMesh);
+    // 4 small corner ticks around the ring
+    const tickMat=new THREE.MeshBasicMaterial({color:0xff6600,transparent:true,opacity:0.85,depthWrite:false});
+    for(let ti=0;ti<4;ti++){
+      const tickGeo=new THREE.BoxGeometry(0.06,0.001,0.22);
+      const tick=new THREE.Mesh(tickGeo,tickMat);
+      tick.rotation.y=ti*Math.PI/2;
+      tick.position.set(Math.sin(ti*Math.PI/2)*0.52,0,Math.cos(ti*Math.PI/2)*0.52);
+      lockMesh.add(tick);
+    }
 
     if(!noSpawn){
       spawnPlayer(); spawnZombies(); spawnContainers(); spawnGroundItems();
@@ -1422,7 +1444,9 @@
       const z=zombies[i];
       const d=dist2(player.x,player.z,z.x,z.z);
       if(d>player.melee.range)continue;
-      if(Math.abs(angleDiff(Math.atan2(z.x-player.x,z.z-player.z),player.angle))>player.melee.arc/2)continue;
+      // player.angle 0 → faces -Z; atan2(dx,dz)=π for zombie at -Z → compare against angle+π
+      const faceAng=player.angle+Math.PI;
+      if(Math.abs(angleDiff(Math.atan2(z.x-player.x,z.z-player.z),faceAng))>player.melee.arc/2)continue;
       z.hp-=baseDmg; z.flashTimer=0.18; hit=true;
       if(z.hp<=0)killZombie(i);
     }
@@ -1444,7 +1468,6 @@
     if(state!=='playing')return;
     if(!player.gun||gunCD>0)return;
     if(player.gun.ammo<=0){
-      // Try auto-reload from inventory
       const ammoSub=player.gun.id+'_ammo';
       const ammoItem=invItems.find(i=>i.type==='ammo'&&i.sub===ammoSub);
       if(ammoItem){ invUse(ammoItem.id); return; }
@@ -1452,31 +1475,43 @@
     }
     player.gun.ammo--; gunCD=GUNS[player.gun.id].fireCd;
     (player.gun.id==='shotgun'?SFX.shotgun:SFX.shoot)();
-
     swingTimer=0.14;
 
-    const origin=new THREE.Vector3(player.x,1.2,player.z);
-    const fwd=new THREE.Vector3(-Math.sin(cameraAngle),0,-Math.cos(cameraAngle)).normalize();
     const baseDmg=eff.gunDmg(GUNS[player.gun.id].dmg);
     const range=GUNS[player.gun.id].range;
-    const rays=[new THREE.Raycaster(origin,fwd,0,range)];
-    if(GUNS[player.gun.id].spread){
-      [-1,1].forEach(s=>{const d=fwd.clone();d.x+=s*0.1;d.z+=s*0.05;d.normalize();rays.push(new THREE.Raycaster(origin,d,0,range));});
+    const isShotgun=player.gun.id==='shotgun';
+    const gunId=player.gun.id;
+
+    // Base aim direction: lock-on target first, then camera forward
+    let bdx,bdz;
+    if(lockTarget&&zombies.includes(lockTarget)){
+      const d=dist2(player.x,player.z,lockTarget.x,lockTarget.z)||0.001;
+      bdx=(lockTarget.x-player.x)/d; bdz=(lockTarget.z-player.z)/d;
+    } else {
+      bdx=-Math.sin(cameraAngle); bdz=-Math.cos(cameraAngle);
     }
-    const hitSet=new Set();
-    for(const ray of rays){
-      const tgts=[]; zombies.forEach(z=>z.mesh.traverse(c=>{if(c.isMesh)tgts.push(c);}));
-      const hits=ray.intersectObjects(tgts);
-      if(hits.length){
-        const obj=hits[0].object;
-        const hz=zombies.find(z=>{let f=false;z.mesh.traverse(c=>{if(c===obj)f=true;});return f;});
-        if(hz&&!hitSet.has(hz))hitSet.add(hz);
-      }
+
+    // Shotgun: 3 pellets with small spread; pistol: 1 bullet
+    const pellets=isShotgun?[
+      {dx:bdx,dz:bdz},
+      {dx:bdx+0.10,dz:bdz+0.05},
+      {dx:bdx-0.10,dz:bdz-0.05},
+    ]:[{dx:bdx,dz:bdz}];
+
+    const bulletColor=isShotgun?0xff8800:0xffee00;
+    const bulletSpd=isShotgun?18:26;
+
+    for(const p of pellets){
+      const len=Math.sqrt(p.dx*p.dx+p.dz*p.dz)||1;
+      const ndx=p.dx/len, ndz=p.dz/len;
+      const geo=new THREE.SphereGeometry(isShotgun?0.07:0.06,4,4);
+      const mat=new THREE.MeshBasicMaterial({color:bulletColor});
+      const mesh=new THREE.Mesh(geo,mat);
+      mesh.position.set(player.x,1.15,player.z);
+      scene.add(mesh);
+      bullets.push({mesh,x:player.x,z:player.z,dx:ndx,dz:ndz,
+                    spd:bulletSpd,distLeft:range,dmg:baseDmg,gunId,hitOnce:!isShotgun});
     }
-    hitSet.forEach(z=>{
-      z.hp-=baseDmg; z.flashTimer=0.22;
-      const idx=zombies.indexOf(z); if(z.hp<=0&&idx!==-1)killZombie(idx);
-    });
     updateHUD();
   }
 
@@ -1717,6 +1752,64 @@
     $interactPrompt.style.display=nearContainer?'block':'none';
     document.getElementById('btn-interact').style.display=nearContainer?'flex':'none';
 
+    // ── Lock-on target update ──
+    if(player.gun){
+      const lockRange=GUNS[player.gun.id].range;
+      const faceAng=player.angle+Math.PI;
+      let best=null,bestDist=Infinity;
+      for(const z of zombies){
+        const d=dist2(player.x,player.z,z.x,z.z);
+        if(d>lockRange)continue;
+        if(Math.abs(angleDiff(Math.atan2(z.x-player.x,z.z-player.z),faceAng))>Math.PI*0.55)continue;
+        if(d<bestDist){bestDist=d;best=z;}
+      }
+      lockTarget=best;
+      if(lockMesh){
+        if(lockTarget){
+          lockMesh.visible=true;
+          lockMesh.position.set(lockTarget.x,2.3+Math.sin(t*5)*0.06,lockTarget.z);
+          lockMesh.rotation.z=t*2.5;
+        } else { lockMesh.visible=false; }
+      }
+    } else {
+      lockTarget=null;
+      if(lockMesh)lockMesh.visible=false;
+    }
+
+    // ── Bullet movement ──
+    for(let bi=bullets.length-1;bi>=0;bi--){
+      const b=bullets[bi];
+      const mv=b.spd*dt;
+      b.x+=b.dx*mv; b.z+=b.dz*mv;
+      b.distLeft-=mv;
+      b.mesh.position.set(b.x,1.15,b.z);
+      // Wall collision
+      if(hitsWall(b.x,b.z,0.1)){
+        scene.remove(b.mesh); b.mesh.geometry.dispose(); b.mesh.material.dispose();
+        bullets.splice(bi,1); continue;
+      }
+      // Zombie hit
+      let removed=false;
+      for(let zi=zombies.length-1;zi>=0;zi--){
+        const z=zombies[zi];
+        if(dist2(b.x,b.z,z.x,z.z)<0.72){
+          z.hp-=b.dmg; z.flashTimer=0.22;
+          SFX.hit();
+          if(z.hp<=0)killZombie(zi);
+          if(b.hitOnce){
+            scene.remove(b.mesh); b.mesh.geometry.dispose(); b.mesh.material.dispose();
+            bullets.splice(bi,1); removed=true; break;
+          }
+        }
+      }
+      if(removed)continue;
+      // Range exhausted
+      if(b.distLeft<=0){
+        scene.remove(b.mesh); b.mesh.geometry.dispose(); b.mesh.material.dispose();
+        bullets.splice(bi,1);
+      }
+    }
+
     // Zombies
     for(let i=zombies.length-1;i>=0;i--){
       const z=zombies[i];
@@ -1882,6 +1975,10 @@
   }
 
   function respawnAtSafehouse(){
+    // Clear any in-flight bullets
+    bullets.forEach(b=>{scene.remove(b.mesh);b.mesh.geometry.dispose();b.mesh.material.dispose();});
+    bullets=[]; lockTarget=null; if(lockMesh)lockMesh.visible=false;
+
     const ps=gw(1,1);
     player.x=ps.x; player.z=ps.z; player.angle=0;
     player.hp=eff.hpMax(); player.stamina=eff.stMax(); player.exhausted=false;
