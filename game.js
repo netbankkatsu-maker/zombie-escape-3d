@@ -62,6 +62,7 @@
   // ================================================================
   const SAVE_KEY  = 'zombie-escape-run-v3';
   const UPG_KEY   = 'zombie-escape-upgrades-v1';
+  const PARTS_KEY = 'zombie-escape-parts-v1';
 
   let upgrades = { hpUp:0, stUp:0, meleeDmg:0, gunDmg:0, speed:0 };
 
@@ -78,6 +79,15 @@
   }
   function saveUpgrades() {
     try { localStorage.setItem(UPG_KEY, JSON.stringify(upgrades)); } catch(_){}
+  }
+  function savePartsStash(n){
+    try{ if(n>0) localStorage.setItem(PARTS_KEY,String(n)); else localStorage.removeItem(PARTS_KEY); }catch(_){}
+  }
+  function loadPartsStashCount(){
+    try{ return Math.max(0,parseInt(localStorage.getItem(PARTS_KEY)||'0',10)); }catch(_){return 0;}
+  }
+  function clearPartsStash(){
+    try{ localStorage.removeItem(PARTS_KEY); }catch(_){}
   }
 
   // Effective stats (with upgrades applied)
@@ -363,9 +373,9 @@
   function makeWallTexture(){
     const W=256,H=256;
     const cv=_makeCanvas(W,H); const ctx=cv.getContext('2d');
-    // base coat: dark mossy concrete
-    ctx.fillStyle='#2a3d18'; ctx.fillRect(0,0,W,H);
-    // brick rows
+    // mortar base: dark grey
+    ctx.fillStyle='#2a2520'; ctx.fillRect(0,0,W,H);
+    // brick rows (running-bond)
     const BW=52,BH=24,GAP=3,rowH=BH+GAP;
     const rows=Math.ceil(H/rowH)+1;
     for(let row=0;row<rows;row++){
@@ -374,27 +384,33 @@
       const cols=Math.ceil((W+BW)/(BW+GAP))+1;
       for(let col=0;col<cols;col++){
         const x=col*(BW+GAP)-offX;
-        const rv=38+Math.floor(Math.random()*14),gv=55+Math.floor(Math.random()*12),bv=20+Math.floor(Math.random()*10);
-        ctx.fillStyle=`rgb(${rv},${gv},${bv})`; ctx.fillRect(x,y,BW,BH);
+        // warm grey-brown bricks — clearly visible
+        const rv=95+Math.floor(Math.random()*25);
+        const gv=82+Math.floor(Math.random()*20);
+        const bv=70+Math.floor(Math.random()*18);
+        // ~12% of bricks get a moss-green tint
+        let r=rv,g=gv,b=bv;
+        if(Math.random()<0.12){r=Math.max(0,rv-20);g=Math.min(255,gv+18);b=Math.max(0,bv-18);}
+        ctx.fillStyle=`rgb(${r},${g},${b})`; ctx.fillRect(x,y,BW,BH);
         // top highlight
-        ctx.fillStyle='rgba(255,255,180,0.07)'; ctx.fillRect(x,y,BW,2);
+        ctx.fillStyle='rgba(255,240,210,0.10)'; ctx.fillRect(x,y,BW,2);
         // bottom shadow
-        ctx.fillStyle='rgba(0,0,0,0.28)'; ctx.fillRect(x,y+BH-2,BW,2);
-        // crack/stain on ~18% of bricks
-        if(Math.random()<0.18){
-          ctx.strokeStyle=`rgba(0,0,0,${0.12+Math.random()*0.18})`; ctx.lineWidth=0.8;
+        ctx.fillStyle='rgba(0,0,0,0.35)'; ctx.fillRect(x,y+BH-2,BW,2);
+        // left edge highlight
+        ctx.fillStyle='rgba(255,255,255,0.05)'; ctx.fillRect(x,y,2,BH);
+        // crack/stain on ~20% of bricks
+        if(Math.random()<0.20){
+          ctx.strokeStyle=`rgba(0,0,0,${0.18+Math.random()*0.22})`; ctx.lineWidth=0.8;
           ctx.beginPath();
-          const cx=x+Math.random()*BW,cy=y+Math.random()*BH;
-          ctx.moveTo(cx,cy); ctx.lineTo(cx+(Math.random()-0.5)*16,cy+(Math.random()-0.5)*14);
+          const cx2=x+Math.random()*BW,cy2=y+Math.random()*BH;
+          ctx.moveTo(cx2,cy2); ctx.lineTo(cx2+(Math.random()-0.5)*18,cy2+(Math.random()-0.5)*16);
           ctx.stroke();
         }
       }
-      // mortar
-      ctx.fillStyle='#1a2410'; ctx.fillRect(0,y+BH,W,GAP);
     }
     // grime overlay
     for(let px=0;px<W;px+=4)for(let py=0;py<H;py+=4){
-      if(Math.random()<0.07){ctx.fillStyle=`rgba(0,0,0,${Math.random()*0.16})`;ctx.fillRect(px,py,4,4);}
+      if(Math.random()<0.06){ctx.fillStyle=`rgba(0,0,0,${Math.random()*0.14})`;ctx.fillRect(px,py,4,4);}
     }
     const tex=new THREE.CanvasTexture(cv);
     tex.wrapS=tex.wrapT=THREE.RepeatWrapping;
@@ -541,7 +557,7 @@
     for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++)if(grid[r][c]===1)cells.push({r,c});
     const iw=new THREE.InstancedMesh(
       new THREE.BoxGeometry(CELL,WALL_H,CELL),
-      new THREE.MeshStandardMaterial({map:wallTex,roughness:0.85,metalness:0.05,color:0xd4e8c0}),
+      new THREE.MeshStandardMaterial({map:wallTex,roughness:0.85,metalness:0.05,color:0xffffff}),
       cells.length
     );
     const dummy=new THREE.Object3D();
@@ -603,6 +619,9 @@
     killCount=0; gameStartTime=performance.now(); gameElapsed=0;
     cameraAngle=0;
     invInit();
+    // Carry stashed parts (from previous win) into the new run
+    const _stash=loadPartsStashCount();
+    if(_stash>0){ invAdd('parts','parts',_stash,0); clearPartsStash(); }
 
     let g;
     if(MODELS.player){
@@ -1151,6 +1170,11 @@
     state='start'; overlayAction='start';
     $oTitle.textContent='🧟 ZOMBIE ESCAPE';
 
+    // Load parts stash so upgrade modal works from the start screen
+    const stash=loadPartsStashCount();
+    invInit();
+    if(stash>0) invAdd('parts','parts',stash,0);
+
     const upgStr = UPG_DEFS.map(u=> upgrades[u.id]>0?`${u.icon}Lv${upgrades[u.id]}`:'').filter(Boolean).join(' ');
     const upgLine = upgStr?`<p style="font-size:11px;color:#88ddff;margin-bottom:8px">強化済み: ${upgStr}</p>`:'';
 
@@ -1166,13 +1190,16 @@
         </div>
       </div>`:'';
 
+    const upgradeHtml=(stash>0||UPG_DEFS.some(u=>upgrades[u.id]>0))?upgradeButtonHtml():'';
+
     $oBody.innerHTML=`
       <p style="font-size:12px;opacity:0.7;line-height:1.75;margin-bottom:10px">
         緑の扉を目指せ！箱を漁って武器ゲット<br>
         左タッチ：移動 &nbsp;右スワイプ：視点 &nbsp;[Shift]：走る<br>
         ⚔ATK &nbsp;🔫FIRE &nbsp;💊HEAL &nbsp;📦OPEN &nbsp;🎒BAG</p>
       ${upgLine}
-      <p style="font-size:12px;color:#aaa;margin-bottom:8px">難易度：</p>
+      ${upgradeHtml}
+      <p style="font-size:12px;color:#aaa;margin-top:10px;margin-bottom:8px">難易度：</p>
       <div class="diff-row">
         ${['easy','normal','hard'].map(d=>`<button class="diff-btn${d===currentDiff?' active':''}" data-d="${d}">
           ${d==='easy'?'😊 Easy':d==='normal'?'🧟 Normal':'💀 Hard'}</button>`).join('')}
@@ -1185,6 +1212,7 @@
     document.getElementById('action-buttons').style.display='none';
     if($nearbyPanel)$nearbyPanel.style.display='none';
     closeInv();
+    bindUpgradeBtn();
 
     $overlay.querySelectorAll('.diff-btn[data-d]').forEach(b=>{
       b.addEventListener('click',e=>{e.stopPropagation();currentDiff=b.dataset.d;D=DIFFS[currentDiff];showStart();});
@@ -1564,6 +1592,8 @@
     const pc=invCountType('parts');
     if(pc<u.cost){notify('資材が足りない！');return;}
     invDeductParts(u.cost);
+    // If we're on the start screen keep the stash in sync with invItems
+    if(state!=='playing') savePartsStash(invCountType('parts'));
     upgrades[id]=(upgrades[id]||0)+1;
     saveUpgrades();
     SFX.upgrade();
@@ -1803,7 +1833,9 @@
   //  WIN / GAMEOVER / RESPAWN
   // ================================================================
   function winGame(){
-    state='win'; SFX.win(); clearRun();
+    state='win'; SFX.win();
+    savePartsStash(invCountType('parts'));
+    clearRun();
     showResult('🎉 脱出成功！',`
       ゾンビから逃げ切った！<br>
       <span style="font-size:13px;color:#aaa">
