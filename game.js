@@ -1,6 +1,12 @@
 (function () {
   'use strict';
 
+  // Icon helper – white SVG from icons/ui/
+  // Function declaration so it is hoisted and usable in ITEM_ICONS const init
+  function ic(name, size=16){
+    return `<img src="icons/ui/${name}.svg" width="${size}" height="${size}" class="gi">`;
+  }
+
   // ================================================================
   //  CONSTANTS
   // ================================================================
@@ -21,10 +27,16 @@
     pistol_ammo:{w:1,h:1}, shotgun_ammo:{w:1,h:1}, parts:{w:1,h:1},
   };
   const ITEM_ICONS = {
-    bat:'🏏', pipe:'🔩', axe:'🪓',
-    pistol:'🔫', shotgun:'💥',
-    bandage:'🩹', medkit:'💊',
-    pistol_ammo:'🔴', shotgun_ammo:'🟠', parts:'⚙️',
+    bat:          ic('baseball-bat'),
+    pipe:         ic('crowbar'),
+    axe:          ic('battle-axe'),
+    pistol:       ic('revolver'),
+    shotgun:      ic('sawed-off-shotgun'),
+    bandage:      ic('bandage-roll'),
+    medkit:       ic('first-aid-kit'),
+    pistol_ammo:  ic('bullets'),
+    shotgun_ammo: ic('shotgun-rounds'),
+    parts:        ic('gears'),
   };
   const ITEM_NAMES = {
     bat:'バット', pipe:'パイプ', axe:'斧',
@@ -47,7 +59,7 @@
   //  WEAPON DEFS
   // ================================================================
   const MELEE = {
-    fists: { name:'素手',   dmg:12, cd:0.55, st:0,  range:1.5, arc:Math.PI/2 },
+    fists: { name:'素手',   dmg:12, cd:0.55, st:0,  range:1.8, arc:Math.PI*0.62 },
     bat:   { name:'バット', dmg:38, cd:0.70, st:20, range:2.0, arc:Math.PI/2 },
     pipe:  { name:'パイプ', dmg:48, cd:0.95, st:26, range:2.1, arc:Math.PI/2 },
     axe:   { name:'斧',     dmg:70, cd:1.30, st:35, range:2.1, arc:Math.PI/2.5 },
@@ -67,11 +79,11 @@
   let upgrades = { hpUp:0, stUp:0, meleeDmg:0, gunDmg:0, speed:0 };
 
   const UPG_DEFS = [
-    { id:'hpUp',     icon:'❤',  name:'HP強化',      max:3, cost:3, desc:'最大HP +20' },
-    { id:'stUp',     icon:'⚡', name:'スタミナ強化', max:3, cost:3, desc:'最大ST +15' },
-    { id:'meleeDmg', icon:'⚔',  name:'近接強化',     max:3, cost:5, desc:'近接ダメ +15%' },
-    { id:'gunDmg',   icon:'🔫', name:'射撃強化',     max:2, cost:5, desc:'銃ダメ +15%' },
-    { id:'speed',    icon:'👟', name:'機動強化',     max:2, cost:4, desc:'速度 +0.5' },
+    { id:'hpUp',     icon:ic('heart-plus',14),       name:'HP強化',      max:3, cost:3, desc:'最大HP +20' },
+    { id:'stUp',     icon:ic('heavy-lightning',14),   name:'スタミナ強化', max:3, cost:3, desc:'最大ST +15' },
+    { id:'meleeDmg', icon:ic('crossed-swords',14),    name:'近接強化',     max:3, cost:5, desc:'近接ダメ +15%' },
+    { id:'gunDmg',   icon:ic('revolver',14),           name:'射撃強化',     max:2, cost:5, desc:'銃ダメ +15%' },
+    { id:'speed',    icon:ic('run',14),                name:'機動強化',     max:2, cost:4, desc:'速度 +0.5' },
   ];
 
   function loadUpgrades() {
@@ -174,6 +186,263 @@
   // Misc timers
   let saveTimer = 5, respawnTO = null;
   let swingTimer = 0, swingMesh = null;
+  // Visual effects
+  let flickerT = 0, shakeTimer = 0, shakeMag = 0, bobPhase = 0, lastMoveSpd = 0;
+  let emgLight = null; // module-scope ref to emergency red light
+
+  // ── Entity ID generator (for multiplayer sync) ──
+  let _eid = 0;
+  function eid(prefix){ return prefix + (++_eid); }
+
+  // ================================================================
+  //  MULTIPLAYER (MP)
+  // ================================================================
+  // 1. Deploy server/ to Render.com, then paste the URL below.
+  // 2. Click ↺ reload in the game to pick up the new URL.
+  const MP_SERVER = 'https://zombie-escape-server.onrender.com';
+
+  let mpSock     = null;   // Socket.io socket instance
+  let mpRoom     = null;   // current room ID
+  let mpHost     = false;  // true if we are the host
+  let mpMyId     = null;   // our socket.id
+  let mpEnabled  = false;  // multiplayer mode active
+  let _mpMoveT   = 0;      // timer for throttled position send
+
+  // Remote players: Map<socketId, {mesh,name,x,z,angle,hp,tx,tz,ta}>
+  const mpPlayers = new Map();
+
+  function mpConnect(roomId, playerName){
+    if(typeof io === 'undefined'){ alert('Socket.io が読み込まれていません。インターネット接続を確認してください。'); return; }
+    if(mpSock) mpSock.disconnect();
+    mpEnabled = true;
+    mpRoom    = roomId.toUpperCase();
+    mpSock    = io(MP_SERVER, { transports:['websocket','polling'] });
+
+    mpSock.on('connect', ()=>{
+      mpMyId = mpSock.id;
+      mpSock.emit('joinRoom', { roomId:mpRoom, name:playerName||'Player' });
+    });
+
+    mpSock.on('connect_error', ()=>{
+      notify('⚠ サーバー接続失敗。URLを確認してください。');
+      mpEnabled = false;
+    });
+
+    mpSock.on('roomJoined', ({ isHost, myId, players })=>{
+      mpHost = isHost; mpMyId = myId;
+      for(const p of players){ if(p.id!==myId) _mpAddPlayer(p); }
+      _mpUpdateLobbyUI();
+      notify(isHost ? '🏠 ルーム作成済み。メンバーを待っています' : '🤝 ルームに参加しました');
+    });
+
+    mpSock.on('playerJoined', ({ id, name })=>{
+      _mpAddPlayer({ id, name, x:0, z:0, angle:0, hp:100 });
+      notify(`👤 ${name} が参加！`);
+      _mpUpdateLobbyUI();
+    });
+
+    mpSock.on('playerLeft', ({ id })=>{
+      _mpRemovePlayer(id); notify('👤 プレイヤーが退出');
+      _mpUpdateLobbyUI();
+    });
+
+    mpSock.on('move', ({ id, x, z, angle, hp })=>{
+      const p = mpPlayers.get(id);
+      if(p){ p.tx=x; p.tz=z; p.ta=angle; p.hp=hp; }
+    });
+
+    mpSock.on('gameStarted', mapData =>{
+      _mpUpdateLobbyUI(); // hide lobby
+      _mpStartAsGuest(mapData);
+    });
+
+    mpSock.on('zombieKill', ({ zombieId })=>{
+      const z = zombies.find(z=>z.id===zombieId);
+      if(z && !z.dying){
+        spawnBloodPool(z.x, z.z);
+        z.dying=true; z.dyingTimer=0.8;
+        z.mesh.traverse(c=>{ if(c.isMesh&&c.material) c.material.transparent=true; });
+        killCount++;
+        const alive = zombies.filter(z=>!z.dying).length;
+        notify(alive===0 ? `${ic('exit-door',14)} 全ゾンビ撃破！` : `${ic('dread-skull',14)} ゾンビ撃破！(${killCount}体)`);
+      }
+    });
+
+    mpSock.on('itemPickup', ({ itemId })=>{
+      const wi = worldItems.find(i=>i.id===itemId);
+      if(wi && !wi.collected){
+        wi.collected=true; scene.remove(wi.mesh);
+        worldItems = worldItems.filter(i=>!i.collected);
+        invalidateNearbyPanel();
+      }
+    });
+
+    mpSock.on('gameWon', ()=>{
+      if(state!=='won') winGame();
+    });
+
+    mpSock.on('hostChanged', ({ hostId })=>{
+      if(hostId===mpMyId){ mpHost=true; notify('🎮 あなたがホストになりました'); }
+      _mpUpdateLobbyUI();
+    });
+
+    mpSock.on('disconnect', ()=>{
+      if(state==='playing') notify('⚠ サーバーから切断されました');
+    });
+  }
+
+  function mpDisconnect(){
+    if(mpSock){ mpSock.disconnect(); mpSock=null; }
+    for(const [,p] of mpPlayers) if(p.mesh && scene) scene.remove(p.mesh);
+    mpPlayers.clear();
+    mpEnabled=false; mpHost=false; mpMyId=null; mpRoom=null;
+  }
+
+  function _mpAddPlayer({ id, name, x, z, angle, hp }){
+    if(mpPlayers.has(id)) return;
+    const mesh = _mpMakeGhostMesh(name);
+    if(state==='playing' && scene) scene.add(mesh);
+    mpPlayers.set(id, { id, name, mesh, x, z, angle, hp, tx:x, tz:z, ta:angle });
+  }
+
+  function _mpRemovePlayer(id){
+    const p = mpPlayers.get(id);
+    if(p && p.mesh && scene) scene.remove(p.mesh);
+    mpPlayers.delete(id);
+  }
+
+  function _mpMakeGhostMesh(/* name */){
+    // Bright orange-red uniform so other players are always visible
+    const g = new THREE.Group();
+    const skinM = new THREE.MeshLambertMaterial({color:0xe0a87c});
+    const unifM = new THREE.MeshLambertMaterial({color:0xcc3300,emissive:new THREE.Color(0x441100),emissiveIntensity:0.6});
+    const vestM = new THREE.MeshLambertMaterial({color:0x882200,emissive:new THREE.Color(0x331100),emissiveIntensity:0.5});
+    const bootM = new THREE.MeshLambertMaterial({color:0x1a0a00});
+    const hairM = new THREE.MeshLambertMaterial({color:0x1a0d05});
+
+    [-0.14,0.14].forEach(ox=>{const b=new THREE.Mesh(new THREE.BoxGeometry(0.24,0.17,0.30),bootM);b.position.set(ox,0.085,0.01);g.add(b);});
+    [-0.13,0.13].forEach(ox=>{const l=new THREE.Mesh(new THREE.BoxGeometry(0.22,0.38,0.22),unifM);l.position.set(ox,0.36,0);g.add(l);});
+    [-0.13,0.13].forEach(ox=>{const l=new THREE.Mesh(new THREE.BoxGeometry(0.25,0.22,0.24),unifM);l.position.set(ox,0.66,0);g.add(l);});
+    const blt=new THREE.Mesh(new THREE.BoxGeometry(0.54,0.07,0.27),new THREE.MeshLambertMaterial({color:0x111111}));blt.position.set(0,0.785,0);g.add(blt);
+    const trs=new THREE.Mesh(new THREE.BoxGeometry(0.54,0.50,0.27),unifM);trs.position.set(0,1.05,0);g.add(trs);
+    const vst=new THREE.Mesh(new THREE.BoxGeometry(0.36,0.42,0.32),vestM);vst.position.set(0,1.05,0);g.add(vst);
+    [-0.40,0.40].forEach(ox=>{
+      const ua=new THREE.Mesh(new THREE.BoxGeometry(0.20,0.28,0.20),unifM);ua.position.set(ox,1.08,0);g.add(ua);
+      const fa=new THREE.Mesh(new THREE.BoxGeometry(0.18,0.26,0.18),unifM);fa.position.set(ox,0.79,0);g.add(fa);
+    });
+    const nk=new THREE.Mesh(new THREE.BoxGeometry(0.17,0.13,0.17),skinM);nk.position.set(0,1.32,0);g.add(nk);
+    const hd=new THREE.Mesh(new THREE.BoxGeometry(0.42,0.40,0.38),skinM);hd.position.set(0,1.57,0);g.add(hd);
+    const h1=new THREE.Mesh(new THREE.BoxGeometry(0.42,0.10,0.38),hairM);h1.position.set(0,1.77,0);g.add(h1);
+    const h2=new THREE.Mesh(new THREE.BoxGeometry(0.46,0.16,0.40),hairM);h2.position.set(0,1.68,0);g.add(h2);
+    // Large bright cyan marker above head — always visible regardless of lighting
+    const mkM=new THREE.MeshBasicMaterial({color:0x00ffff});
+    const mk=new THREE.Mesh(new THREE.SphereGeometry(0.18,8,8),mkM);
+    mk.position.y=2.30; g.add(mk);
+    // Vertical beam (makes it easier to spot across the map)
+    const beam=new THREE.Mesh(new THREE.BoxGeometry(0.06,0.50,0.06),mkM);
+    beam.position.y=2.55; g.add(beam);
+    return g;
+  }
+
+  function _mpTickPlayers(dt){
+    for(const [,p] of mpPlayers){
+      if(!p.mesh) continue;
+      const lr = Math.min(1, dt*10);
+      p.x += (p.tx-p.x)*lr;
+      p.z += (p.tz-p.z)*lr;
+      p.angle += angleDiff(p.ta, p.angle)*lr;
+      p.mesh.position.set(p.x, 0, p.z);
+      p.mesh.rotation.y = p.angle;
+    }
+  }
+
+  function _mpSendMove(){
+    if(!mpSock||!mpEnabled||state!=='playing') return;
+    mpSock.emit('move', { x:player.x, z:player.z, angle:player.angle, hp:Math.floor(player.hp) });
+  }
+
+  // ── Map data: host extracts, guests receive ──
+  function _mpExtractMapData(){
+    return {
+      grid: grid.map(r=>[...r]),
+      zombieSpawns:    zombies.map(z=>({ id:z.id, x:z.x, z:z.z })),
+      containerSpawns: containers.map(c=>({ id:c.id, type:c.type, x:c.x, z:c.z })),
+      worldItemSpawns: worldItems.map(i=>({ id:i.id, type:i.type, sub:i.sub, amount:i.amount, ammo:i.ammo, x:i.x, z:i.z, bob:i.bob })),
+    };
+  }
+
+  function _mpStartAsGuest(mapData){
+    try {
+      D = DIFFS[currentDiff];
+      grid = mapData.grid;          // use host's grid
+      buildScene(true);             // build walls/floor/etc, skip spawns
+      spawnPlayer();                // spawn own player
+      _mpRebuildFromData(mapData);  // place zombies/items/containers from host data
+      _mpPlaceGhosts();             // add host ghost at spawn point (not 0,0,0)
+      enterGame();
+    } catch(e){
+      console.error('mpStartAsGuest:', e);
+      notify('⚠ マップ同期エラー: '+e.message);
+    }
+  }
+
+  function _mpRebuildFromData(mapData){
+    // Zombies
+    zombies = [];
+    for(const sp of mapData.zombieSpawns){
+      const mesh = makeZombieMesh();
+      mesh.position.set(sp.x, 0, sp.z); scene.add(mesh);
+      zombies.push({ id:sp.id, x:sp.x, z:sp.z,
+        angle:Math.random()*Math.PI*2, hp:D.zHp, maxHp:D.zHp, mesh,
+        wTimer:Math.random()*3, wDir:Math.random()*Math.PI*2,
+        lastDmg:0, flashTimer:0, attackAnim:0 });
+    }
+    // Containers
+    containers = [];
+    for(const sp of mapData.containerSpawns){
+      const mesh = makeContainerMesh(sp.type);
+      mesh.position.set(sp.x, 0, sp.z); scene.add(mesh);
+      containers.push({ id:sp.id, type:sp.type, x:sp.x, z:sp.z, mesh, opened:false });
+    }
+    // World items
+    worldItems = [];
+    for(const sp of mapData.worldItemSpawns){
+      const mesh = makeItemMesh(sp.type, sp.sub);
+      mesh.position.set(sp.x, 0.5, sp.z); scene.add(mesh);
+      worldItems.push({ id:sp.id, type:sp.type, sub:sp.sub, amount:sp.amount||0,
+        ammo:sp.ammo||0, x:sp.x, z:sp.z, mesh, collected:false, bob:sp.bob||0 });
+    }
+    invalidateNearbyPanel();
+  }
+
+  // ── Lobby UI update (called when player list changes) ──
+  function _mpUpdateLobbyUI(){
+    if(state!=='start') return; // only update when on menu screens
+    if(_menuScreen==='mp-lobby') _menuMpLobby();
+    else if(_menuScreen==='mp-room') _menuMpRoom();
+  }
+
+  function mpHostStartGame(){
+    if(!mpHost || !mpSock) return;
+    D = DIFFS[currentDiff];
+    buildGrid(); buildScene(); // spawns happen here
+    const mapData = _mpExtractMapData();
+    _mpPlaceGhosts(); // add ghosts to scene at spawn point
+    mpSock.emit('startGame', mapData);
+    enterGame();
+  }
+
+  function _mpPlaceGhosts(){
+    // Place all remote player ghosts at spawn point so they're not buried in a wall
+    const sp = gw(1,1);
+    for(const [,p] of mpPlayers){
+      if(!p.mesh) continue;
+      p.x = sp.x; p.z = sp.z;
+      p.tx = sp.x; p.tz = sp.z;
+      p.mesh.position.set(sp.x, 0, sp.z);
+      scene.add(p.mesh);
+    }
+  }
 
   const player = {
     x:0, z:0, angle:0, mesh:null,
@@ -189,6 +458,7 @@
   let nearbyWorldItems = [];
   let invOpen = false;
   let invCtxId = null;
+  let invDrag = null;  // DnD state: {id,ghostEl,startX,startY,active,hoverKey}
 
   let zombies = [], worldItems = [], containers = [];
   let nearContainer = null;
@@ -276,7 +546,7 @@
     initRenderer();
     setupInput();
 
-    $oTitle.textContent = '🧟 ZOMBIE ESCAPE';
+    $oTitle.innerHTML = `${ic('shambling-zombie',24)} ZOMBIE ESCAPE`;
     $oBody.innerHTML = '<p style="color:#aaa;font-size:14px;margin-top:8px">Loading models...</p>';
     $oBtn.style.display = 'none';
     $overlay.style.display = 'flex';
@@ -327,8 +597,7 @@
       if(!hasMTL||!hasOBJ){resolve();return;}
 
       const defs=[
-        ['player','./models/zombie/','Characters_Matt.mtl','Characters_Matt.obj',1.75,true],
-        ['zombie','./models/zombie/','Zombie_Basic.mtl','Zombie_Basic.obj',1.75,true],
+        // Player + zombie use RE-style procedural models (OBJ disabled)
         ['chest', './models/zombie/','Chest.mtl','Chest.obj',0.85,true],
         ['locker','./models/zombie/','Container_Green.mtl','Container_Green.obj',2.2,true],
       ];
@@ -364,8 +633,8 @@
     $canvas.appendChild(renderer.domElement);
 
     scene=new THREE.Scene();
-    scene.background=new THREE.Color(0x05050f);
-    scene.fog=new THREE.FogExp2(0x05050f,0.030);
+    scene.background=new THREE.Color(0x030800);
+    scene.fog=new THREE.FogExp2(0x030800,0.028);
 
     camera=new THREE.PerspectiveCamera(68,window.innerWidth/window.innerHeight,0.1,80);
     clock=new THREE.Clock();
@@ -388,44 +657,61 @@
   function makeWallTexture(){
     const W=256,H=256;
     const cv=_makeCanvas(W,H); const ctx=cv.getContext('2d');
-    // mortar base: dark grey
-    ctx.fillStyle='#2a2520'; ctx.fillRect(0,0,W,H);
-    // brick rows (running-bond)
-    const BW=52,BH=24,GAP=3,rowH=BH+GAP;
-    const rows=Math.ceil(H/rowH)+1;
-    for(let row=0;row<rows;row++){
-      const y=row*rowH;
-      const offX=(row%2===0)?0:BW*0.5+GAP*0.5;
-      const cols=Math.ceil((W+BW)/(BW+GAP))+1;
-      for(let col=0;col<cols;col++){
-        const x=col*(BW+GAP)-offX;
-        // warm grey-brown bricks — clearly visible
-        const rv=95+Math.floor(Math.random()*25);
-        const gv=82+Math.floor(Math.random()*20);
-        const bv=70+Math.floor(Math.random()*18);
-        // ~12% of bricks get a moss-green tint
-        let r=rv,g=gv,b=bv;
-        if(Math.random()<0.12){r=Math.max(0,rv-20);g=Math.min(255,gv+18);b=Math.max(0,bv-18);}
-        ctx.fillStyle=`rgb(${r},${g},${b})`; ctx.fillRect(x,y,BW,BH);
-        // top highlight
-        ctx.fillStyle='rgba(255,240,210,0.10)'; ctx.fillRect(x,y,BW,2);
-        // bottom shadow
-        ctx.fillStyle='rgba(0,0,0,0.35)'; ctx.fillRect(x,y+BH-2,BW,2);
-        // left edge highlight
-        ctx.fillStyle='rgba(255,255,255,0.05)'; ctx.fillRect(x,y,2,BH);
-        // crack/stain on ~20% of bricks
-        if(Math.random()<0.20){
-          ctx.strokeStyle=`rgba(0,0,0,${0.18+Math.random()*0.22})`; ctx.lineWidth=0.8;
-          ctx.beginPath();
-          const cx2=x+Math.random()*BW,cy2=y+Math.random()*BH;
-          ctx.moveTo(cx2,cy2); ctx.lineTo(cx2+(Math.random()-0.5)*18,cy2+(Math.random()-0.5)*16);
-          ctx.stroke();
-        }
+    // Base: ruined concrete dark grey-green
+    ctx.fillStyle='#1a1c16'; ctx.fillRect(0,0,W,H);
+    // Concrete variation patches
+    for(let i=0;i<200;i++){
+      const px=Math.random()*W,py=Math.random()*H;
+      const pw=Math.random()*24+4,ph=Math.random()*18+4;
+      const v=Math.floor(Math.random()*14);
+      ctx.fillStyle=`rgba(${28+v},${30+v},${22+v},0.40)`;
+      ctx.fillRect(px,py,pw,ph);
+    }
+    // Vertical water-streak / moisture stains
+    for(let s=0;s<6;s++){
+      const sx=Math.random()*W;
+      const sh=Math.random()*H*0.6+H*0.3;
+      const sy=Math.random()*(H-sh);
+      const grd=ctx.createLinearGradient(sx,sy,sx+Math.random()*8-4,sy+sh);
+      grd.addColorStop(0,'rgba(0,0,0,0)');
+      grd.addColorStop(0.4,`rgba(0,0,0,${0.20+Math.random()*0.18})`);
+      grd.addColorStop(1,'rgba(0,0,0,0)');
+      ctx.fillStyle=grd; ctx.fillRect(sx-2,sy,5,sh);
+    }
+    // Cracks
+    for(let c=0;c<5;c++){
+      let cx=Math.random()*W,cy=Math.random()*H;
+      ctx.strokeStyle=`rgba(0,0,0,${0.40+Math.random()*0.30})`; ctx.lineWidth=0.7;
+      ctx.beginPath(); ctx.moveTo(cx,cy);
+      for(let s=0;s<12;s++){
+        cx+=(Math.random()-0.5)*20; cy+=Math.random()*14+2;
+        ctx.lineTo(cx,cy);
+      }
+      ctx.stroke();
+    }
+    // Blood splatter (~5 spots)
+    for(let b=0;b<5;b++){
+      const bx=Math.random()*W,by=Math.random()*H;
+      const r=Math.random()*12+5;
+      const grd=ctx.createRadialGradient(bx,by,0,bx,by,r);
+      grd.addColorStop(0,`rgba(80,0,0,${0.55+Math.random()*0.25})`);
+      grd.addColorStop(1,'rgba(40,0,0,0)');
+      ctx.beginPath(); ctx.arc(bx,by,r,0,Math.PI*2);
+      ctx.fillStyle=grd; ctx.fill();
+      // Drip
+      if(Math.random()<0.5){
+        const dl=Math.random()*30+10;
+        const gdrd=ctx.createLinearGradient(bx,by,bx+(Math.random()-0.5)*6,by+dl);
+        gdrd.addColorStop(0,`rgba(70,0,0,0.50)`);
+        gdrd.addColorStop(1,'rgba(40,0,0,0)');
+        ctx.strokeStyle=gdrd; ctx.lineWidth=1.5+Math.random()*1.5;
+        ctx.beginPath(); ctx.moveTo(bx,by); ctx.lineTo(bx+(Math.random()-0.5)*4,by+dl);
+        ctx.stroke();
       }
     }
-    // grime overlay
-    for(let px=0;px<W;px+=4)for(let py=0;py<H;py+=4){
-      if(Math.random()<0.06){ctx.fillStyle=`rgba(0,0,0,${Math.random()*0.14})`;ctx.fillRect(px,py,4,4);}
+    // Overall grime dots
+    for(let px=0;px<W;px+=3)for(let py=0;py<H;py+=3){
+      if(Math.random()<0.04){ctx.fillStyle=`rgba(0,0,0,${Math.random()*0.12})`;ctx.fillRect(px,py,3,3);}
     }
     const tex=new THREE.CanvasTexture(cv);
     tex.wrapS=tex.wrapT=THREE.RepeatWrapping;
@@ -434,33 +720,50 @@
   }
 
   function makeFloorTexture(){
-    const W=256,H=256;
+    const W=512,H=512;
     const cv=_makeCanvas(W,H); const ctx=cv.getContext('2d');
-    ctx.fillStyle='#0c0c18'; ctx.fillRect(0,0,W,H);
-    const T=64,TGAP=2,tilesX=Math.ceil(W/T)+1,tilesY=Math.ceil(H/T)+1;
-    for(let tx=0;tx<tilesX;tx++){
-      for(let ty=0;ty<tilesY;ty++){
-        const x=tx*T,y=ty*T,v=Math.floor(Math.random()*10);
-        ctx.fillStyle=`rgb(${13+v},${13+v},${22+v})`; ctx.fillRect(x,y,T-TGAP,T-TGAP);
-        if(Math.random()<0.14){
-          const grd=ctx.createRadialGradient(x+T*0.5,y+T*0.5,2,x+T*0.5,y+T*0.5,T*0.44);
-          grd.addColorStop(0,'rgba(0,0,0,0.32)'); grd.addColorStop(1,'rgba(0,0,0,0)');
-          ctx.fillStyle=grd; ctx.fillRect(x,y,T,T);
-        }
-      }
+    // Base: dark concrete brown-grey
+    ctx.fillStyle='#141410'; ctx.fillRect(0,0,W,H);
+    // Concrete texture noise patches
+    for(let i=0;i<400;i++){
+      const px=Math.random()*W,py=Math.random()*H;
+      const pw=Math.random()*22+3,ph=Math.random()*16+3;
+      const v=Math.floor(Math.random()*14);
+      ctx.fillStyle=`rgba(${22+v},${20+v},${15+v},0.30)`;
+      ctx.fillRect(px,py,pw,ph);
     }
-    // grout
-    ctx.fillStyle='#070710';
-    for(let tx=0;tx<=tilesX;tx++)ctx.fillRect(tx*T-TGAP,0,TGAP,H);
-    for(let ty=0;ty<=tilesY;ty++)ctx.fillRect(0,ty*T-TGAP,W,TGAP);
-    // grime dots
-    for(let i=0;i<100;i++){
-      ctx.beginPath(); ctx.arc(Math.random()*W,Math.random()*H,Math.random()*2.5+0.5,0,Math.PI*2);
+    // Cracks: random-walk polylines
+    for(let c=0;c<10;c++){
+      let cx=Math.random()*W,cy=Math.random()*H;
+      const steps=Math.floor(30+Math.random()*60);
+      ctx.strokeStyle=`rgba(0,0,0,${0.30+Math.random()*0.30})`; ctx.lineWidth=0.7;
+      ctx.beginPath(); ctx.moveTo(cx,cy);
+      for(let s=0;s<steps;s++){
+        cx+=(Math.random()-0.5)*10; cy+=(Math.random()-0.5)*10;
+        ctx.lineTo(Math.max(0,Math.min(W,cx)),Math.max(0,Math.min(H,cy)));
+      }
+      ctx.stroke();
+    }
+    // Blood stains: dark red irregular ellipses
+    for(let b=0;b<14;b++){
+      const bx=Math.random()*W,by=Math.random()*H;
+      const rx=Math.random()*32+10,ry=Math.random()*20+6;
+      const grd=ctx.createRadialGradient(bx,by,0,bx,by,rx);
+      grd.addColorStop(0,`rgba(55,0,0,${0.50+Math.random()*0.28})`);
+      grd.addColorStop(0.6,`rgba(30,0,0,${0.25+Math.random()*0.15})`);
+      grd.addColorStop(1,'rgba(15,0,0,0)');
+      ctx.save(); ctx.translate(bx,by); ctx.scale(1,ry/rx); ctx.rotate(Math.random()*Math.PI);
+      ctx.beginPath(); ctx.arc(0,0,rx,0,Math.PI*2);
+      ctx.fillStyle=grd; ctx.fill(); ctx.restore();
+    }
+    // Grime / dust
+    for(let i=0;i<120;i++){
+      ctx.beginPath(); ctx.arc(Math.random()*W,Math.random()*H,Math.random()*3+0.5,0,Math.PI*2);
       ctx.fillStyle=`rgba(0,0,0,${Math.random()*0.28+0.04})`; ctx.fill();
     }
     const tex=new THREE.CanvasTexture(cv);
     tex.wrapS=tex.wrapT=THREE.RepeatWrapping;
-    tex.repeat.set(15,15);
+    tex.repeat.set(12,12);
     return tex;
   }
 
@@ -541,16 +844,20 @@
     bullets=[]; lockTarget=null; lockMesh=null;
     worldItems=[]; containers=[];
     swingMesh=null;
+    // Reset visual effect state
+    flickerT=0; shakeTimer=0; bobPhase=0; lastMoveSpd=0;
+    emgLight=null;
+    _bloodPools.length=0;
 
     // ── Lighting ──
     // HemisphereLight: sky blue-grey above, warm dark brown below → surfaces get depth
-    const hemi=new THREE.HemisphereLight(0x334466,0x1a1208,0.55); scene.add(hemi);
-    // Player point light (intensity lowered from 2.8 because ACES makes it appear brighter)
-    const pl=new THREE.PointLight(0x7799ff,2.2,18); pl.name='pLight'; scene.add(pl);
+    const hemi=new THREE.HemisphereLight(0x1a2810,0x0d0800,0.60); scene.add(hemi);
+    // Player point light — yellow-green flashlight tint
+    const pl=new THREE.PointLight(0x88bb66,2.0,18); pl.name='pLight'; scene.add(pl);
     // Emergency red accent light at map center — adds creepy atmosphere
     const midP=gw(Math.floor(ROWS/2),Math.floor(COLS/2));
-    const emgL=new THREE.PointLight(0xff1100,0.45,16);
-    emgL.position.set(midP.x,WALL_H*0.82,midP.z); scene.add(emgL);
+    emgLight=new THREE.PointLight(0xff1100,0.45,16);
+    emgLight.position.set(midP.x,WALL_H*0.82,midP.z); scene.add(emgLight);
 
     // ── Floor ──
     const floorTex=makeFloorTexture();
@@ -661,17 +968,63 @@
     if(MODELS.player){
       g=cloneModel(MODELS.player);
     } else {
+      // RPD/STARS officer (RE-style) — front = local -Z
       g=new THREE.Group();
-      const legM=new THREE.MeshLambertMaterial({color:0x223366});
-      [-0.14,0.14].forEach(ox=>{const l=new THREE.Mesh(new THREE.BoxGeometry(0.2,0.55,0.2),legM);l.position.set(ox,0.275,0);g.add(l);});
-      const torso=new THREE.Mesh(new THREE.BoxGeometry(0.52,0.62,0.28),new THREE.MeshLambertMaterial({color:0x3a6abf}));
-      torso.position.set(0,0.83,0); g.add(torso);
-      const armM=new THREE.MeshLambertMaterial({color:0x3a6abf});
-      [-0.38,0.38].forEach(ox=>{const a=new THREE.Mesh(new THREE.BoxGeometry(0.18,0.52,0.18),armM);a.position.set(ox,0.75,0);g.add(a);});
-      const head=new THREE.Mesh(new THREE.BoxGeometry(0.44,0.44,0.44),new THREE.MeshLambertMaterial({color:0xffcc99}));
-      head.position.set(0,1.38,0); g.add(head);
+      const pSkinM=new THREE.MeshLambertMaterial({color:0xe0a87c});
+      const pNavyM=new THREE.MeshLambertMaterial({color:0x1c2448});
+      const pVestM=new THREE.MeshLambertMaterial({color:0x0f1220});
+      const pBootM=new THREE.MeshLambertMaterial({color:0x0a0a0a});
+      const pHairM=new THREE.MeshLambertMaterial({color:0x1a0d05});
+      const pBeltM=new THREE.MeshLambertMaterial({color:0x111111});
+      const pBadgeM=new THREE.MeshLambertMaterial({color:0xc8a820,emissive:new THREE.Color(0x443310),emissiveIntensity:0.5});
+      // Boots
+      [-0.14,0.14].forEach(ox=>{
+        const b=new THREE.Mesh(new THREE.BoxGeometry(0.24,0.17,0.30),pBootM);
+        b.position.set(ox,0.085,0.01); g.add(b);
+      });
+      // Lower legs
+      [-0.13,0.13].forEach(ox=>{
+        const l=new THREE.Mesh(new THREE.BoxGeometry(0.22,0.38,0.22),pNavyM);
+        l.position.set(ox,0.36,0); g.add(l);
+      });
+      // Upper legs
+      [-0.13,0.13].forEach(ox=>{
+        const l=new THREE.Mesh(new THREE.BoxGeometry(0.25,0.22,0.24),pNavyM);
+        l.position.set(ox,0.66,0); g.add(l);
+      });
+      // Belt
+      const pBelt=new THREE.Mesh(new THREE.BoxGeometry(0.54,0.07,0.27),pBeltM);
+      pBelt.position.set(0,0.785,0); g.add(pBelt);
+      // Torso (navy jacket)
+      const pTorso=new THREE.Mesh(new THREE.BoxGeometry(0.54,0.50,0.27),pNavyM);
+      pTorso.position.set(0,1.05,0); g.add(pTorso);
+      // Tactical vest (darker, slightly wider depth)
+      const pVest=new THREE.Mesh(new THREE.BoxGeometry(0.36,0.42,0.32),pVestM);
+      pVest.position.set(0,1.05,0); g.add(pVest);
+      // STARS gold badge (left chest, facing front = -Z)
+      const pBadge=new THREE.Mesh(new THREE.BoxGeometry(0.08,0.06,0.02),pBadgeM);
+      pBadge.position.set(-0.13,1.12,-0.17); g.add(pBadge);
+      // Arms
+      [-0.40,0.40].forEach(ox=>{
+        const ua=new THREE.Mesh(new THREE.BoxGeometry(0.20,0.28,0.20),pNavyM);
+        ua.position.set(ox,1.08,0); g.add(ua);
+        const fa=new THREE.Mesh(new THREE.BoxGeometry(0.18,0.26,0.18),pNavyM);
+        fa.position.set(ox,0.79,0); g.add(fa);
+      });
+      // Neck
+      const pNeck=new THREE.Mesh(new THREE.BoxGeometry(0.17,0.13,0.17),pSkinM);
+      pNeck.position.set(0,1.32,0); g.add(pNeck);
+      // Head
+      const pHead=new THREE.Mesh(new THREE.BoxGeometry(0.42,0.40,0.38),pSkinM);
+      pHead.position.set(0,1.57,0); g.add(pHead);
+      // Hair (dark, short cropped)
+      const pHairTop=new THREE.Mesh(new THREE.BoxGeometry(0.42,0.10,0.38),pHairM);
+      pHairTop.position.set(0,1.77,0); g.add(pHairTop);
+      const pHairSide=new THREE.Mesh(new THREE.BoxGeometry(0.46,0.16,0.40),pHairM);
+      pHairSide.position.set(0,1.68,0); g.add(pHairSide);
     }
     player.mesh=g; g.position.set(player.x,0,player.z); scene.add(g);
+    updatePlayerWeaponVisual();
     camera.position.set(player.x,CAM_H,player.z+CAM_DIST); camera.lookAt(player.x,1,player.z);
   }
 
@@ -682,6 +1035,7 @@
     player.gun   = data.gunId&&GUNS[data.gunId]?{...GUNS[data.gunId],id:data.gunId,ammo:data.gunAmmo}:null;
     player.mesh.position.set(player.x,0,player.z);
     player.mesh.rotation.y=player.angle;
+    updatePlayerWeaponVisual();
   }
 
   // ================================================================
@@ -691,21 +1045,64 @@
     let g;
     if(MODELS.zombie){
       g=cloneModel(MODELS.zombie);
+      // OBJ zombie naturally faces -Z; rotate inner mesh so group front = +Z
+      // (z.angle = atan2 toward player, so rotation.y=z.angle must yield +Z→player)
+      if(g.children.length>0) g.children[0].rotation.y=Math.PI;
     } else {
+      // RE-style zombie — front = local +Z, arms reach toward player
       g=new THREE.Group();
-      const sk=0x4a7840;
-      const legM=new THREE.MeshLambertMaterial({color:0x1a2a15});
-      [-0.13,0.13].forEach(ox=>{const l=new THREE.Mesh(new THREE.BoxGeometry(0.2,0.5,0.2),legM);l.position.set(ox,0.25,0);g.add(l);});
-      const body=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.58,0.26),new THREE.MeshLambertMaterial({color:0x22441a}));
-      body.position.y=0.79; g.add(body);
-      const aM=new THREE.MeshLambertMaterial({color:sk});
-      [-1,1].forEach(s=>{const a=new THREE.Mesh(new THREE.BoxGeometry(0.18,0.16,0.55),aM);a.position.set(s*0.38,0.88,-0.27);g.add(a);});
-      const head=new THREE.Mesh(new THREE.BoxGeometry(0.44,0.44,0.44),new THREE.MeshLambertMaterial({color:sk}));
-      head.position.y=1.29; g.add(head);
-      const eM=new THREE.MeshBasicMaterial({color:0xff1100}),eG=new THREE.SphereGeometry(0.065,6,6);
-      [-0.12,0.12].forEach(ox=>{const e=new THREE.Mesh(eG,eM);e.position.set(ox,1.34,-0.23);g.add(e);});
+      const zDeadSkin=new THREE.MeshLambertMaterial({color:0x8a9070}); // grey-green dead flesh
+      const zArm=new THREE.MeshLambertMaterial({color:0x7a8068});      // slightly darker arms
+      const zPants=new THREE.MeshLambertMaterial({color:0x2e2836});    // dark grey worn pants
+      const zShirt=new THREE.MeshLambertMaterial({color:0xc0b898});    // dirty cream shirt
+      const zBlood=new THREE.MeshLambertMaterial({color:0x3a0000});    // dark dried blood
+      const zDecay=new THREE.MeshLambertMaterial({color:0x5a6050});    // dark decay patches
+      const zEye=new THREE.MeshBasicMaterial({color:0xddddd0});        // milky white eyes (RE trademark)
+      // Feet (bare / worn shoes)
+      [-0.12,0.12].forEach(ox=>{
+        const f=new THREE.Mesh(new THREE.BoxGeometry(0.20,0.10,0.25),new THREE.MeshLambertMaterial({color:0x1a1208}));
+        f.position.set(ox,0.05,0.02); g.add(f);
+      });
+      // Legs (torn dark pants)
+      [-0.13,0.13].forEach(ox=>{
+        const l=new THREE.Mesh(new THREE.BoxGeometry(0.22,0.52,0.22),zPants);
+        l.position.set(ox,0.36,0); g.add(l);
+      });
+      // Torso — dirty torn shirt
+      const zBody=new THREE.Mesh(new THREE.BoxGeometry(0.54,0.58,0.28),zShirt);
+      zBody.position.y=0.90; g.add(zBody);
+      // Large blood stain on chest (front = +Z)
+      const zB1=new THREE.Mesh(new THREE.BoxGeometry(0.22,0.28,0.30),zBlood);
+      zB1.position.set(0.06,0.90,0.01); g.add(zB1);
+      // Bite wound / decay patch on shoulder
+      const zB2=new THREE.Mesh(new THREE.BoxGeometry(0.14,0.12,0.30),zDecay);
+      zB2.position.set(-0.22,1.06,0); g.add(zB2);
+      // Arms reaching FORWARD (+Z = toward player)
+      [-1,1].forEach(s=>{
+        const ua=new THREE.Mesh(new THREE.BoxGeometry(0.20,0.15,0.32),zArm);
+        ua.position.set(s*0.39,0.97,0.18); g.add(ua);
+        const fa=new THREE.Mesh(new THREE.BoxGeometry(0.17,0.13,0.30),zDeadSkin);
+        fa.position.set(s*0.40,0.93,0.40); g.add(fa);
+      });
+      // Neck (grey-green)
+      const zNeck=new THREE.Mesh(new THREE.BoxGeometry(0.18,0.14,0.18),zDeadSkin);
+      zNeck.position.set(0,1.24,0.04); g.add(zNeck);
+      // Head (slightly forward lean — RE zombie lurch)
+      const zHead=new THREE.Mesh(new THREE.BoxGeometry(0.48,0.44,0.44),zDeadSkin);
+      zHead.position.set(0,1.52,0.08); g.add(zHead);
+      // Milky white eyes (RE-style — NOT red glowing)
+      const eG=new THREE.SphereGeometry(0.065,6,4);
+      [-0.13,0.13].forEach(ox=>{
+        const e=new THREE.Mesh(eG,zEye);
+        e.position.set(ox,1.56,0.23); g.add(e);
+      });
+      // Decay/wound marks on face
+      const zWound=new THREE.Mesh(new THREE.BoxGeometry(0.10,0.06,0.46),zDecay);
+      zWound.position.set(0.12,1.50,0.04); g.add(zWound);
     }
-    const zl=new THREE.PointLight(0x44ff22,0.6,5); zl.position.y=1.2; g.add(zl);
+    // No bright glow — RE zombies don't emit green light
+    // Faint sickly ambient (barely visible, just a hint of presence)
+    const zl=new THREE.PointLight(0x443310,0.15,3); zl.position.y=1.2; g.add(zl);
     return g;
   }
 
@@ -715,7 +1112,7 @@
       const cell=openCell(4,4,true); if(!cell)continue;
       const wp=gw(cell.r,cell.c); const mesh=makeZombieMesh();
       mesh.position.set(wp.x,0,wp.z); scene.add(mesh);
-      zombies.push({x:wp.x,z:wp.z,angle:Math.random()*Math.PI*2,
+      zombies.push({id:eid('z'),x:wp.x,z:wp.z,angle:Math.random()*Math.PI*2,
                     hp:D.zHp,maxHp:D.zHp,mesh,
                     wTimer:Math.random()*3,wDir:Math.random()*Math.PI*2,
                     lastDmg:0,flashTimer:0,
@@ -739,10 +1136,10 @@
   //  ITEMS  (always use fast colored boxes)
   // ================================================================
   const ITEM_COLOR = {
-    heal_bandage:0xffffff, heal_medkit:0x22cc55,
-    ammo:0xffcc00, parts:0xff8800,
-    melee_bat:0xcc8833, melee_pipe:0x8899aa, melee_axe:0x778855,
-    gun_pistol:0x4488cc, gun_shotgun:0xcc4444,
+    heal_bandage:0x22cc3a, heal_medkit:0xe8e8e8,
+    ammo:0xccaa00, parts:0xff8800,
+    melee_bat:0xaa6622, melee_pipe:0x778899, melee_axe:0x556644,
+    gun_pistol:0x333344, gun_shotgun:0x3a2010,
   };
   const ITEM_GLOW  = {
     heal_bandage:0xffffff, heal_medkit:0x44ff88,
@@ -753,34 +1150,148 @@
 
   function makeItemMesh(type,sub){
     const g=new THREE.Group();
-    const ck = type==='melee'?`melee_${sub}`:type==='heal'?`heal_${sub}`:type==='gun'?`gun_${sub}`:type;
-    const col  = ITEM_COLOR[ck]||0xaaaaaa;
-    const gcol = ITEM_GLOW[ck]||col;
+    const ck=type==='melee'?`melee_${sub}`:type==='heal'?`heal_${sub}`:type==='gun'?`gun_${sub}`:type;
+    const col=ITEM_COLOR[ck]||0xaaaaaa;
 
     if(type==='heal'&&sub==='bandage'){
-      const rM=new THREE.MeshStandardMaterial({color:0xff2222,emissive:0xff2222,emissiveIntensity:0.35,roughness:0.7,metalness:0.0});
-      g.add(new THREE.Mesh(new THREE.BoxGeometry(0.08,0.28,0.08),rM));
-      g.add(new THREE.Mesh(new THREE.BoxGeometry(0.28,0.08,0.08),rM));
+      // === Green Herb (RE-style) ===
+      const stemM=new THREE.MeshStandardMaterial({color:0x18aa2a,emissive:new THREE.Color(0x0a4a14),emissiveIntensity:0.5,roughness:0.7});
+      const leafM=new THREE.MeshStandardMaterial({color:0x22cc3a,emissive:new THREE.Color(0x0a5518),emissiveIntensity:0.4,roughness:0.6});
+      g.add(new THREE.Mesh(new THREE.CylinderGeometry(0.025,0.035,0.18,6),stemM));
+      for(let i=0;i<3;i++){
+        const ang=i*(Math.PI*2/3);
+        const leaf=new THREE.Mesh(new THREE.BoxGeometry(0.07,0.12,0.025),leafM);
+        leaf.position.set(Math.sin(ang)*0.06,0.02+i*0.02,Math.cos(ang)*0.06);
+        leaf.rotation.y=ang; leaf.rotation.z=0.35;
+        g.add(leaf);
+      }
+    } else if(type==='heal'&&sub==='medkit'){
+      // === First Aid Spray (RE-style) ===
+      const bodyM=new THREE.MeshStandardMaterial({color:0xe8e8e8,emissive:new THREE.Color(0x444444),emissiveIntensity:0.18,roughness:0.4,metalness:0.4});
+      const capM=new THREE.MeshStandardMaterial({color:0xcc1111,emissive:new THREE.Color(0x550000),emissiveIntensity:0.3,roughness:0.6});
+      const crossM=new THREE.MeshStandardMaterial({color:0xdd1111,emissive:new THREE.Color(0x660000),emissiveIntensity:0.5});
+      g.add(new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.07,0.22,8),bodyM));
+      const spCap=new THREE.Mesh(new THREE.CylinderGeometry(0.035,0.055,0.06,6),capM);
+      spCap.position.y=0.14; g.add(spCap);
+      // Red cross label on body
+      g.add(new THREE.Mesh(new THREE.BoxGeometry(0.075,0.06,0.01),crossM));
+      const cr2=new THREE.Mesh(new THREE.BoxGeometry(0.01,0.06,0.075),crossM); g.add(cr2);
     } else if(type==='parts'){
-      const pM=new THREE.MeshStandardMaterial({color:col,emissive:col,emissiveIntensity:0.28,roughness:0.45,metalness:0.6});
+      const pM=new THREE.MeshStandardMaterial({color:col,emissive:new THREE.Color(col),emissiveIntensity:0.28,roughness:0.45,metalness:0.6});
       g.add(new THREE.Mesh(new THREE.BoxGeometry(0.28,0.12,0.28),pM));
       const r2=new THREE.Mesh(new THREE.BoxGeometry(0.12,0.28,0.12),pM); r2.rotation.y=Math.PI/4; g.add(r2);
-    } else {
-      let w=0.32,h=0.28,d=0.28;
-      if(type==='melee'){w=0.1;h=0.58;d=0.1;}
-      if(type==='gun')  {w=0.38;h=0.18;d=0.16;}
-      if(type==='ammo') {w=0.22;h=0.22;d=0.22;}
-      const mat=new THREE.MeshStandardMaterial({color:col,emissive:col,emissiveIntensity:0.22,roughness:0.5,metalness:0.3});
-      g.add(new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat));
+    } else if(type==='ammo'){
+      // Yellow ammo box
+      const boxM=new THREE.MeshStandardMaterial({color:0xccaa00,emissive:new THREE.Color(0x443300),emissiveIntensity:0.25,roughness:0.5});
+      const stripM=new THREE.MeshStandardMaterial({color:0x886600,roughness:0.8});
+      g.add(new THREE.Mesh(new THREE.BoxGeometry(0.26,0.20,0.18),boxM));
+      const stripe=new THREE.Mesh(new THREE.BoxGeometry(0.27,0.055,0.01),stripM);
+      stripe.position.z=-0.09; g.add(stripe);
+    } else if(type==='melee'){
+      const mat=new THREE.MeshStandardMaterial({color:col,emissive:new THREE.Color(col),emissiveIntensity:0.18,roughness:0.65});
+      if(sub==='bat'){
+        g.add(new THREE.Mesh(new THREE.BoxGeometry(0.085,0.52,0.085),mat));
+        const tape=new THREE.Mesh(new THREE.BoxGeometry(0.090,0.13,0.090),
+          new THREE.MeshStandardMaterial({color:0x111111,roughness:0.9}));
+        tape.position.y=-0.18; g.add(tape);
+      } else if(sub==='axe'){
+        g.add(new THREE.Mesh(new THREE.BoxGeometry(0.07,0.50,0.07),mat));
+        const ahead=new THREE.Mesh(new THREE.BoxGeometry(0.26,0.17,0.05),mat);
+        ahead.position.set(0.06,0.18,0); g.add(ahead);
+      } else {
+        g.add(new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.04,0.58,6),mat));
+      }
+    } else if(type==='gun'){
+      if(sub==='pistol'){
+        const mat=new THREE.MeshStandardMaterial({color:0x333344,emissive:new THREE.Color(0x111122),emissiveIntensity:0.18,roughness:0.35,metalness:0.75});
+        const gripM=new THREE.MeshStandardMaterial({color:0x1a1a2a,roughness:0.7,metalness:0.2});
+        g.add(new THREE.Mesh(new THREE.BoxGeometry(0.06,0.075,0.26),mat));
+        const grip=new THREE.Mesh(new THREE.BoxGeometry(0.055,0.18,0.10),gripM);
+        grip.position.set(0,-0.11,-0.06); g.add(grip);
+        const slide=new THREE.Mesh(new THREE.BoxGeometry(0.055,0.085,0.22),
+          new THREE.MeshStandardMaterial({color:0x222232,metalness:0.85,roughness:0.25}));
+        slide.position.y=0.08; g.add(slide);
+      } else {
+        const woodM=new THREE.MeshStandardMaterial({color:0x3a2010,roughness:0.75,metalness:0.05});
+        const metalM=new THREE.MeshStandardMaterial({color:0x1e1e1e,metalness:0.85,roughness:0.25});
+        g.add(new THREE.Mesh(new THREE.BoxGeometry(0.085,0.10,0.24),woodM));
+        const brl=new THREE.Mesh(new THREE.BoxGeometry(0.055,0.065,0.36),metalM);
+        brl.position.set(0,0.02,0.12); g.add(brl);
+        const pump=new THREE.Mesh(new THREE.BoxGeometry(0.085,0.055,0.13),
+          new THREE.MeshStandardMaterial({color:0x4a3020,roughness:0.8}));
+        pump.position.set(0,-0.02,0.09); g.add(pump);
+      }
     }
-    // No per-item PointLight — emissive material provides the glow effect
-    // without the heavy per-light GPU cost (20+ lights were killing performance)
     return g;
+  }
+
+  // ── Held weapon on player model ──
+  function makeHeldWeaponMesh(type,sub){
+    const g=new THREE.Group();
+    const ck=type==='melee'?`melee_${sub}`:type==='gun'?`gun_${sub}`:null;
+    if(!ck)return g;
+    const col=ITEM_COLOR[ck]||0xaaaaaa;
+    const mat=new THREE.MeshLambertMaterial({color:col});
+    const darkMat=new THREE.MeshLambertMaterial({color:0x111111});
+    if(type==='melee'){
+      const hh=sub==='axe'?0.48:0.58;
+      g.add(new THREE.Mesh(new THREE.BoxGeometry(0.07,hh,0.07),mat));
+      if(sub==='axe'){
+        const aHead=new THREE.Mesh(new THREE.BoxGeometry(0.24,0.15,0.05),mat);
+        aHead.position.set(0.06,hh*0.35,0); g.add(aHead);
+      } else if(sub==='bat'){
+        // Handle wrap (darker tape near grip)
+        const tape=new THREE.Mesh(new THREE.BoxGeometry(0.075,0.14,0.075),darkMat);
+        tape.position.y=-hh*0.32; g.add(tape);
+      }
+    } else {
+      if(sub==='shotgun'){
+        g.add(new THREE.Mesh(new THREE.BoxGeometry(0.075,0.09,0.50),mat));
+        const brl=new THREE.Mesh(new THREE.BoxGeometry(0.05,0.065,0.38),darkMat);
+        brl.position.y=0.01; g.add(brl);
+      } else {
+        g.add(new THREE.Mesh(new THREE.BoxGeometry(0.06,0.085,0.28),mat));
+        const slide=new THREE.Mesh(new THREE.BoxGeometry(0.05,0.07,0.22),darkMat);
+        slide.position.y=0.01; g.add(slide);
+      }
+    }
+    return g;
+  }
+
+  function updatePlayerWeaponVisual(){
+    if(!player.mesh)return;
+    const old=player.mesh.getObjectByName('heldWeapon');
+    if(old)player.mesh.remove(old);
+    // OBJ model has its own mesh — skip adding box weapon to avoid clipping
+    if(MODELS.player)return;
+    if(player.gun){
+      const wm=makeHeldWeaponMesh('gun',player.gun.id);
+      wm.name='heldWeapon';
+      wm.position.set(0.40,0.86,-0.32);
+      player.mesh.add(wm);
+    } else if(player.melee.id!=='fists'){
+      const wm=makeHeldWeaponMesh('melee',player.melee.id);
+      wm.name='heldWeapon';
+      wm.position.set(0.42,0.72,-0.32);
+      wm.rotation.x=-0.25;
+      player.mesh.add(wm);
+    }
+  }
+
+  // ── Item use floating animation ──
+  function showItemUseAnim(icon){
+    const el=document.createElement('div');
+    el.className='item-use-popup';
+    el.innerHTML=icon;
+    el.style.left=(window.innerWidth/2-16)+'px';
+    el.style.top=(window.innerHeight*0.44-16)+'px';
+    document.body.appendChild(el);
+    setTimeout(()=>el.remove(),950);
   }
 
   function createItem(type,sub,amount,ammo,x,z){
     const mesh=makeItemMesh(type,sub); mesh.position.set(x,0.5,z); scene.add(mesh);
-    worldItems.push({type,sub,amount:amount||0,ammo:ammo||0,x,z,mesh,collected:false,bob:Math.random()*Math.PI*2});
+    worldItems.push({id:eid('i'),type,sub,amount:amount||0,ammo:ammo||0,x,z,mesh,collected:false,bob:Math.random()*Math.PI*2});
     invalidateNearbyPanel();
   }
   function randomMeleeSub(){const r=Math.random();return r<0.5?'bat':r<0.8?'pipe':'axe';}
@@ -847,7 +1358,7 @@
       const cell=openCell(2,2,true); if(!cell)continue;
       const wp=gw(cell.r,cell.c), type=Math.random()<0.4?'locker':'box';
       const mesh=makeContainerMesh(type); mesh.position.set(wp.x,0,wp.z); scene.add(mesh);
-      containers.push({type,x:wp.x,z:wp.z,mesh,opened:false});
+      containers.push({id:eid('c'),type,x:wp.x,z:wp.z,mesh,opened:false});
     }
   }
   function restoreContainers(saved){
@@ -937,7 +1448,7 @@
     if(!item)return;
     const ox=(Math.random()-0.5)*2.0, oz=(Math.random()-0.5)*2.0;
     createItem(item.type,item.sub,item.amount,item.ammo,player.x+ox,player.z+oz);
-    notify(`${ITEM_ICONS[item.sub]||'📦'} ${ITEM_NAMES[item.sub]||item.sub}を捨てた`);
+    notify(`${ITEM_ICONS[item.sub]||ic('strongbox')} ${ITEM_NAMES[item.sub]||item.sub}を捨てた`);
     updateHUD(true);
   }
 
@@ -950,15 +1461,15 @@
       invRemove(id);
       if(prev.id!=='fists') invAdd('melee',prev.id,1,0);
       player.melee={...MELEE[item.sub],id:item.sub};
-      notify(`⚔ ${MELEE[item.sub].name}を装備！`);
+      notify(ic('crossed-swords',14)+` ${MELEE[item.sub].name}を装備！`);
     } else if(item.type==='gun'){
       const prev=player.gun;
       invRemove(id);
       if(prev) invAdd('gun',prev.id,1,prev.ammo);
       player.gun={...GUNS[item.sub],id:item.sub,ammo:item.ammo};
-      notify(`🔫 ${GUNS[item.sub].name}を装備！`);
+      notify(ic('revolver',14)+` ${GUNS[item.sub].name}を装備！`);
     }
-    SFX.pickup(); updateHUD(true); if(invOpen)renderInvUI();
+    SFX.pickup(); updatePlayerWeaponVisual(); updateHUD(true); if(invOpen)renderInvUI();
   }
 
   // Use consumable from inventory
@@ -972,7 +1483,8 @@
       player.hp=Math.min(eff.hpMax(),player.hp+healAmt);
       item.amount--;
       if(item.amount<=0)invRemove(id);
-      SFX.heal(); notify(`💊 HP +${healAmt} 回復`);
+      SFX.heal(); notify(ic('first-aid-kit',14)+` HP +${healAmt} 回復`);
+      showItemUseAnim(item.sub==='medkit'?ic('first-aid-kit',28):ic('bandage-roll',28));
       updateHUD(true); if(invOpen)renderInvUI();
     } else if(item.type==='ammo'){
       if(!player.gun){notify('銃がない！');return;}
@@ -983,7 +1495,8 @@
       if(add<=0){notify('弾は満タン！');return;}
       player.gun.ammo+=add; item.amount-=add;
       if(item.amount<=0)invRemove(id);
-      notify(`🔫 弾薬 +${add}（残弾:${player.gun.ammo}）`);
+      notify(ic('revolver',14)+` 弾薬 +${add}（残弾:${player.gun.ammo}）`);
+      showItemUseAnim(player.gun.id==='shotgun'?ic('shotgun-rounds',28):ic('bullets',28));
       SFX.pickup(); updateHUD(true); if(invOpen)renderInvUI();
     }
   }
@@ -1003,16 +1516,38 @@
   // ── Pickup world item into inventory ──
   function pickupWorldItem(worldItem){
     if(worldItem.collected)return;
+
+    // ── Pre-flight: verify the pickup would succeed BEFORE removing from world ──
+    // Auto-equip paths always succeed (no inventory slot needed)
+    const autoMelee = worldItem.type==='melee' && player.melee.id==='fists';
+    const autoGun   = worldItem.type==='gun'   && !player.gun;
+    // Stackable items merge into existing slot — always succeeds if stack exists
+    const isStack   = worldItem.type==='heal'||worldItem.type==='ammo'||worldItem.type==='parts';
+    const hasStack  = isStack && invItems.some(i=>i.type===worldItem.type&&i.sub===worldItem.sub);
+    // Ammo can fill the equipped gun without using an inventory slot
+    const fillsGun  = worldItem.type==='ammo' && player.gun &&
+                      player.gun.id===worldItem.sub.replace('_ammo','') &&
+                      player.gun.ammo < GUNS[player.gun.id].maxAmmo;
+    // If none of the above apply, we need a free inventory slot — check it now
+    if(!autoMelee && !autoGun && !hasStack && !fillsGun){
+      const sz=ITEM_SIZES[worldItem.sub]||{w:1,h:1};
+      if(!invFindSlot(sz.w,sz.h)){
+        notify('🎒 インベントリがいっぱい！アイテムを整理してから再度タップ');
+        return; // Keep item in world
+      }
+    }
+
+    // ── Commit: remove from world ──
     worldItem.collected=true;
     scene.remove(worldItem.mesh);
     worldItems=worldItems.filter(i=>!i.collected);
+    if(mpEnabled && mpSock && worldItem.id) mpSock.emit('itemPickup', { itemId:worldItem.id });
     invalidateNearbyPanel();
 
-    const icon=ITEM_ICONS[worldItem.sub]||'📦';
+    const icon=ITEM_ICONS[worldItem.sub]||ic('strongbox');
     const name=ITEM_NAMES[worldItem.sub]||worldItem.sub;
 
     if(worldItem.type==='ammo'){
-      // If matching gun equipped, fill ammo directly first
       if(player.gun&&player.gun.id===worldItem.sub.replace('_ammo','')){
         const max=GUNS[player.gun.id].maxAmmo;
         const add=Math.min(worldItem.amount,max-player.gun.ammo);
@@ -1024,40 +1559,33 @@
           SFX.pickup(); updateHUD(true); return;
         }
       }
-      if(!invAdd('ammo',worldItem.sub,worldItem.amount,0))
-        notify('インベントリがいっぱい！');
-      else { SFX.pickup(); notify(`${icon} ${name} ×${worldItem.amount}`); }
+      invAdd('ammo',worldItem.sub,worldItem.amount,0); // space guaranteed above
+      SFX.pickup(); notify(`${icon} ${name} ×${worldItem.amount}`);
 
     } else if(worldItem.type==='heal'){
-      if(!invAdd('heal',worldItem.sub,1,0))
-        notify('インベントリがいっぱい！');
-      else { SFX.pickup(); notify(`${icon} ${name}`); }
+      invAdd('heal',worldItem.sub,1,0);
+      SFX.pickup(); notify(`${icon} ${name}`);
 
     } else if(worldItem.type==='parts'){
-      if(!invAdd('parts','parts',worldItem.amount,0))
-        notify('インベントリがいっぱい！');
-      else { SFX.pickup(); notify(`⚙️ 資材 +${worldItem.amount}`); }
+      invAdd('parts','parts',worldItem.amount,0);
+      SFX.pickup(); notify(ic('gears',14)+` 資材 +${worldItem.amount}`);
 
     } else if(worldItem.type==='melee'){
-      // Auto-equip if using fists, else bag it
-      if(player.melee.id==='fists'){
+      if(autoMelee){
         player.melee={...MELEE[worldItem.sub],id:worldItem.sub};
-        SFX.pickup(); notify(`⚔ ${MELEE[worldItem.sub].name}を装備！`);
+        SFX.pickup(); updatePlayerWeaponVisual(); notify(ic('crossed-swords',14)+` ${MELEE[worldItem.sub].name}を装備！`);
       } else {
-        if(!invAdd('melee',worldItem.sub,1,0))
-          notify('インベントリがいっぱい！');
-        else { SFX.pickup(); notify(`${icon} ${name}をバッグに入れた`); }
+        invAdd('melee',worldItem.sub,1,0);
+        SFX.pickup(); notify(`${icon} ${name}をバッグに入れた`);
       }
 
     } else if(worldItem.type==='gun'){
-      // Auto-equip if no gun, else bag it
-      if(!player.gun){
+      if(autoGun){
         player.gun={...GUNS[worldItem.sub],id:worldItem.sub,ammo:worldItem.ammo};
-        SFX.pickup(); notify(`🔫 ${GUNS[worldItem.sub].name}を装備！`);
+        SFX.pickup(); updatePlayerWeaponVisual(); notify(ic('revolver',14)+` ${GUNS[worldItem.sub].name}を装備！`);
       } else {
-        if(!invAdd('gun',worldItem.sub,1,worldItem.ammo))
-          notify('インベントリがいっぱい！');
-        else { SFX.pickup(); notify(`${icon} ${name}をバッグに入れた`); }
+        invAdd('gun',worldItem.sub,1,worldItem.ammo);
+        SFX.pickup(); notify(`${icon} ${name}をバッグに入れた`);
       }
     }
     updateHUD(true);
@@ -1080,7 +1608,7 @@
 
     $nearbyPanel.style.display='block';
     $nearbyPanel.innerHTML=nearby.map((it,i)=>{
-      const icon=ITEM_ICONS[it.sub]||'📦';
+      const icon=ITEM_ICONS[it.sub]||ic('strongbox');
       const name=ITEM_NAMES[it.sub]||it.sub;
       const info=it.type==='gun'?` (${it.ammo}発)`:
                  (it.type==='ammo'||it.type==='parts')&&it.amount>1?` ×${it.amount}`:'';
@@ -1104,15 +1632,148 @@
     invOpen=true;
     if($invOverlay)$invOverlay.style.display='flex';
     renderInvUI();
-    // hide nearby panel while inv open
     if($nearbyPanel)$nearbyPanel.style.display='none';
+    document.addEventListener('pointermove',_invOnPointerMove);
+    document.addEventListener('pointerup',_invOnPointerUp);
+    document.addEventListener('pointercancel',_invOnPointerUp);
   }
 
   function closeInv(){
     invOpen=false; invCtxId=null;
+    if(invDrag){if(invDrag.ghostEl)invDrag.ghostEl.remove();invDrag=null;}
+    _invClearDropHighlight();
     if($invOverlay)$invOverlay.style.display='none';
     const ctx=document.getElementById('inv-ctx');
     if(ctx)ctx.style.display='none';
+    document.removeEventListener('pointermove',_invOnPointerMove);
+    document.removeEventListener('pointerup',_invOnPointerUp);
+    document.removeEventListener('pointercancel',_invOnPointerUp);
+  }
+
+  // ── Inventory: rotate item (swap w/h) ──
+  function rotateInvItem(id){
+    const item=invGetItem(id);
+    if(!item||item.w===item.h)return; // square items can't rotate
+    const nw=item.h,nh=item.w;
+    invClearItem(item); // temporarily clear grid
+    // Try same position first
+    if(invCanPlace(item.row,item.col,nw,nh)){
+      item.w=nw;item.h=nh;invPlaceItem(item);renderInvUI();return;
+    }
+    // Find any free slot
+    item.w=nw;item.h=nh;
+    const slot=invFindSlot(nw,nh);
+    if(slot){
+      item.row=slot.row;item.col=slot.col;invPlaceItem(item);renderInvUI();return;
+    }
+    // Revert — no room
+    item.w=nh;item.h=nw;invPlaceItem(item);
+    notify('回転できません（スペース不足）');
+  }
+
+  // ── Inventory Drag-and-Drop ──
+  function _invDragStart(id,clientX,clientY){
+    const item=invGetItem(id); if(!item)return;
+    const icon=ITEM_ICONS[item.sub]||ic('strongbox');
+    const ghost=document.createElement('div');
+    ghost.className='inv-drag-ghost';
+    // Compute display size from actual rendered grid
+    const gridEl=document.getElementById('inv-grid');
+    let gw2=item.w*58,gh2=item.h*58;
+    if(gridEl){
+      const rect=gridEl.getBoundingClientRect();
+      const cw=(rect.width-8)/INV_COLS;
+      const ch=(rect.height-8)/INV_ROWS;
+      gw2=item.w*cw+(item.w-1)*0;
+      gh2=item.h*ch+(item.h-1)*0;
+    }
+    ghost.style.width=gw2+'px'; ghost.style.height=gh2+'px';
+    ghost.innerHTML=`<span style="font-size:22px">${icon}</span>`;
+    ghost.style.left=(clientX-gw2/2)+'px'; ghost.style.top=(clientY-gh2/2)+'px';
+    document.body.appendChild(ghost);
+    invDrag={id,ghostEl:ghost,startX:clientX,startY:clientY,active:false,hoverKey:null};
+  }
+
+  function _invOnPointerMove(e){
+    if(!invDrag)return;
+    const clientX=e.clientX,clientY=e.clientY;
+    const dx=clientX-invDrag.startX,dy=clientY-invDrag.startY;
+    if(!invDrag.active){
+      if(Math.sqrt(dx*dx+dy*dy)<8)return;
+      invDrag.active=true;
+      // Deselect context menu while dragging
+      invCtxId=null;
+      const ctx=document.getElementById('inv-ctx');
+      if(ctx)ctx.style.display='none';
+      renderInvUI(); // hide selection highlight
+    }
+    const gw2=parseFloat(invDrag.ghostEl.style.width)||40;
+    const gh2=parseFloat(invDrag.ghostEl.style.height)||40;
+    invDrag.ghostEl.style.left=(clientX-gw2/2)+'px';
+    invDrag.ghostEl.style.top=(clientY-gh2/2)+'px';
+    // Compute hover cell
+    const gridEl=document.getElementById('inv-grid');
+    if(!gridEl)return;
+    const rect=gridEl.getBoundingClientRect();
+    const cw=(rect.width-8)/INV_COLS;
+    const ch=(rect.height-8)/INV_ROWS;
+    const col=Math.floor((clientX-rect.left-4)/cw);
+    const row=Math.floor((clientY-rect.top-4)/ch);
+    const key=`${row},${col}`;
+    if(invDrag.hoverKey===key)return;
+    invDrag.hoverKey=key;
+    const item=invGetItem(invDrag.id);
+    if(!item)return;
+    const valid=col>=0&&row>=0&&col+item.w<=INV_COLS&&row+item.h<=INV_ROWS&&
+                invCanPlace(row,col,item.w,item.h,item.id);
+    _invHighlightDrop(row,col,item.w,item.h,valid);
+  }
+
+  function _invOnPointerUp(e){
+    if(!invDrag)return;
+    const drag=invDrag; invDrag=null;
+    if(drag.ghostEl)drag.ghostEl.remove();
+    _invClearDropHighlight();
+    if(!drag.active){
+      // Short tap — treat as select
+      selectInvItem(drag.id);
+      return;
+    }
+    // Attempt drop
+    const gridEl=document.getElementById('inv-grid');
+    if(gridEl){
+      const rect=gridEl.getBoundingClientRect();
+      const cw=(rect.width-8)/INV_COLS;
+      const ch=(rect.height-8)/INV_ROWS;
+      const col=Math.floor((e.clientX-rect.left-4)/cw);
+      const row=Math.floor((e.clientY-rect.top-4)/ch);
+      const item=invGetItem(drag.id);
+      if(item&&col>=0&&row>=0&&col+item.w<=INV_COLS&&row+item.h<=INV_ROWS&&
+         invCanPlace(row,col,item.w,item.h,item.id)){
+        invClearItem(item);
+        item.row=row;item.col=col;
+        invPlaceItem(item);
+      }
+    }
+    renderInvUI();
+  }
+
+  function _invHighlightDrop(row,col,w,h,canDrop){
+    const gridEl=document.getElementById('inv-grid');
+    if(!gridEl)return;
+    const cells=gridEl.querySelectorAll('.inv-cell');
+    cells.forEach((c,i)=>{
+      const cr=Math.floor(i/INV_COLS),cc=i%INV_COLS;
+      c.classList.remove('drop-ok','drop-bad');
+      if(cr>=row&&cr<row+h&&cc>=col&&cc<col+w)
+        c.classList.add(canDrop?'drop-ok':'drop-bad');
+    });
+  }
+
+  function _invClearDropHighlight(){
+    const gridEl=document.getElementById('inv-grid');
+    if(!gridEl)return;
+    gridEl.querySelectorAll('.drop-ok,.drop-bad').forEach(c=>c.classList.remove('drop-ok','drop-bad'));
   }
 
   function renderInvUI(){
@@ -1136,14 +1797,12 @@
       div.style.top=(item.row*(INV_CELL+INV_GAP)+INV_PAD)+'px';
       div.style.width=(item.w*INV_CELL+(item.w-1)*INV_GAP)+'px';
       div.style.height=(item.h*INV_CELL+(item.h-1)*INV_GAP)+'px';
-      const icon=ITEM_ICONS[item.sub]||'📦';
+      const icon=ITEM_ICONS[item.sub]||ic('strongbox');
       let extra='';
       if(item.type==='gun') extra=`<small>${item.ammo}発</small>`;
       else if(item.amount>1) extra=`<span class="inv-count">${item.amount}</span>`;
       div.innerHTML=`<span class="inv-icon">${icon}</span>${extra}`;
-      const doSelect=()=>selectInvItem(item.id);
-      div.addEventListener('click',doSelect);
-      div.addEventListener('touchend',e=>{e.preventDefault();doSelect();});
+      div.addEventListener('pointerdown',e=>{e.preventDefault();_invDragStart(item.id,e.clientX,e.clientY);});
       gridEl.appendChild(div);
     });
 
@@ -1151,12 +1810,12 @@
     const eqMelee=document.getElementById('equip-melee');
     const eqGun=document.getElementById('equip-gun');
     if(eqMelee){
-      eqMelee.innerHTML=`<div class="eq-label">近接</div><div class="eq-val">⚔ ${player.melee.name}</div>`;
+      eqMelee.innerHTML=`<div class="eq-label">近接</div><div class="eq-val">${ic('crossed-swords',13)} ${player.melee.name}</div>`;
       eqMelee.className='equip-slot'+(player.melee.id!=='fists'?' has-item':'');
     }
     if(eqGun){
       if(player.gun){
-        eqGun.innerHTML=`<div class="eq-label">銃</div><div class="eq-val">🔫 ${player.gun.name}<br><small>${player.gun.ammo}/${GUNS[player.gun.id].maxAmmo}発</small></div>`;
+        eqGun.innerHTML=`<div class="eq-label">銃</div><div class="eq-val">${ic('revolver',13)} ${player.gun.name}<br><small>${player.gun.ammo}/${GUNS[player.gun.id].maxAmmo}発</small></div>`;
         eqGun.className='equip-slot has-item';
       } else {
         eqGun.innerHTML=`<div class="eq-label">銃</div><div class="eq-val" style="color:#555">なし</div>`;
@@ -1171,7 +1830,7 @@
       btnUnequipGun.onclick=()=>{
         if(!player.gun)return;
         if(invAdd('gun',player.gun.id,1,player.gun.ammo)){
-          player.gun=null; updateHUD(true); renderInvUI();
+          player.gun=null; updatePlayerWeaponVisual(); updateHUD(true); renderInvUI();
           notify('銃をバッグにしまった');
         } else notify('インベントリがいっぱい！');
       };
@@ -1182,7 +1841,7 @@
       btnUnequipMelee.onclick=()=>{
         if(player.melee.id==='fists')return;
         if(invAdd('melee',player.melee.id,1,0)){
-          player.melee={...MELEE.fists,id:'fists'}; updateHUD(true); renderInvUI();
+          player.melee={...MELEE.fists,id:'fists'}; updatePlayerWeaponVisual(); updateHUD(true); renderInvUI();
           notify('武器をバッグにしまった');
         } else notify('インベントリがいっぱい！');
       };
@@ -1203,75 +1862,208 @@
     ctx.style.display='flex';
     const btnEquip=document.getElementById('inv-ctx-equip');
     const btnUse=document.getElementById('inv-ctx-use');
+    const btnRotate=document.getElementById('inv-ctx-rotate');
     if(btnEquip) btnEquip.style.display=(item.type==='melee'||item.type==='gun')?'':'none';
     if(btnUse)   btnUse.style.display=(item.type==='heal'||item.type==='ammo')?'':'none';
+    if(btnRotate) btnRotate.style.display=(item.w!==item.h)?'':'none';
   }
 
   // ================================================================
-  //  START / OVERLAYS
+  //  MENU SCREENS (multi-step navigation)
   // ================================================================
-  function showStart(){
-    state='start'; overlayAction='start';
-    $oTitle.textContent='🧟 ZOMBIE ESCAPE';
+  let _menuScreen = 'title'; // 'title'|'mode'|'solo'|'mp-room'|'mp-lobby'
 
-    // Load parts stash so upgrade modal works from the start screen
-    const stash=loadPartsStashCount();
-    invInit();
-    if(stash>0) invAdd('parts','parts',stash,0);
-
-    const upgStr = UPG_DEFS.map(u=> upgrades[u.id]>0?`${u.icon}Lv${upgrades[u.id]}`:'').filter(Boolean).join(' ');
-    const upgLine = upgStr?`<p style="font-size:11px;color:#88ddff;margin-bottom:8px">強化済み: ${upgStr}</p>`:'';
-
-    const save=hasSave()?loadRunData():null;
-    const saveHtml=save?`
-      <div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.12);padding-top:12px">
-        <p style="font-size:11px;color:#aaa;margin-bottom:8px">
-          📂 セーブあり: ${save.diff||'normal'} &nbsp;🕐 ${fmtTime(save.elapsed||0)} &nbsp;💀 ${save.kills||0}体
-        </p>
-        <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
-          <button id="btn-continue-run" class="diff-btn active">📂 続きから</button>
-          <button id="btn-delete-run"   class="diff-btn" style="border-color:#aa4444;color:#ff6666">🗑 削除</button>
-        </div>
-      </div>`:'';
-
-    const upgradeHtml=(stash>0||UPG_DEFS.some(u=>upgrades[u.id]>0))?upgradeButtonHtml():'';
-
-    $oBody.innerHTML=`
-      <p style="font-size:12px;opacity:0.7;line-height:1.75;margin-bottom:10px">
-        緑の扉を目指せ！箱を漁って武器ゲット<br>
-        左タッチ：移動 &nbsp;右スワイプ：視点 &nbsp;[Shift]：走る<br>
-        ⚔ATK &nbsp;🔫FIRE &nbsp;💊HEAL &nbsp;📦OPEN &nbsp;🎒BAG</p>
-      ${upgLine}
-      ${upgradeHtml}
-      <p style="font-size:12px;color:#aaa;margin-top:10px;margin-bottom:8px">難易度：</p>
-      <div class="diff-row">
-        ${['easy','normal','hard'].map(d=>`<button class="diff-btn${d===currentDiff?' active':''}" data-d="${d}">
-          ${d==='easy'?'😊 Easy':d==='normal'?'🧟 Normal':'💀 Hard'}</button>`).join('')}
-      </div>
-      ${saveHtml}`;
-
-    $oBtn.textContent='NEW GAME';
-    $oBtn.style.display='';
-    $overlay.style.display='flex'; $hud.style.display='none';
-    document.getElementById('action-buttons').style.display='none';
-    if($nearbyPanel)$nearbyPanel.style.display='none';
+  function showMenuScreen(screen){
+    _menuScreen = screen;
+    state = 'start'; overlayAction = 'start';
+    $oTitle.innerHTML = `${ic('shambling-zombie',16)} ZOMBIE ESCAPE`;
+    $oBtn.style.display = 'none';
+    $overlay.style.display = 'flex';
+    $hud.style.display = 'none';
+    document.getElementById('action-buttons').style.display = 'none';
+    if($nearbyPanel) $nearbyPanel.style.display = 'none';
     closeInv();
-    bindUpgradeBtn();
+    if(screen==='title')    _menuTitle();
+    else if(screen==='mode')    _menuMode();
+    else if(screen==='solo')    _menuSolo();
+    else if(screen==='mp-room') _menuMpRoom();
+    else if(screen==='mp-lobby')_menuMpLobby();
+  }
+  function showStart(){ showMenuScreen('title'); }
 
-    $overlay.querySelectorAll('.diff-btn[data-d]').forEach(b=>{
-      b.addEventListener('click',e=>{e.stopPropagation();currentDiff=b.dataset.d;D=DIFFS[currentDiff];showStart();});
-      b.addEventListener('touchend',e=>{e.preventDefault();e.stopPropagation();currentDiff=b.dataset.d;D=DIFFS[currentDiff];showStart();});
+  // Helpers
+  function _mBack(to){ return `<button class="mback" data-to="${to}">← 戻る</button>`; }
+  function _bindBack(){
+    $oBody.querySelectorAll('.mback').forEach(b=>{
+      b.addEventListener('click',e=>{e.stopPropagation();showMenuScreen(b.dataset.to);});
+      b.addEventListener('touchend',e=>{e.preventDefault();e.stopPropagation();showMenuScreen(b.dataset.to);});
     });
-    const btnCont=document.getElementById('btn-continue-run');
-    if(btnCont){
-      btnCont.addEventListener('click',()=>{const d=loadRunData();if(d)loadAndStart(d);});
-      btnCont.addEventListener('touchend',e=>{e.preventDefault();const d=loadRunData();if(d)loadAndStart(d);});
-    }
-    const btnDel=document.getElementById('btn-delete-run');
-    if(btnDel){
-      btnDel.addEventListener('click',()=>{clearRun();showStart();});
-      btnDel.addEventListener('touchend',e=>{e.preventDefault();clearRun();showStart();});
-    }
+  }
+  function _mbtn(id,cls,txt){ return `<button id="${id}" class="mbtn ${cls}">${txt}</button>`; }
+  function _bind(id,fn){
+    const el=document.getElementById(id); if(!el)return;
+    el.addEventListener('click',e=>{e.stopPropagation();fn();});
+    el.addEventListener('touchend',e=>{e.preventDefault();e.stopPropagation();fn();});
+  }
+
+  // ── TITLE ──
+  function _menuTitle(){
+    const stash=loadPartsStashCount(); invInit(); if(stash>0)invAdd('parts','parts',stash,0);
+    const upgStr=UPG_DEFS.map(u=>upgrades[u.id]>0?`${u.icon}Lv${upgrades[u.id]}`:'').filter(Boolean).join(' ');
+    const hasUpg=stash>0||UPG_DEFS.some(u=>upgrades[u.id]>0);
+    const hasSv=hasSave(); const sv=hasSv?loadRunData():null;
+    $oBody.innerHTML=`
+      <div class="ms">
+        <p class="ms-hint">${ic('crossed-swords',12)}ATK &nbsp;${ic('revolver',12)}FIRE &nbsp;${ic('first-aid-kit',12)}HEAL &nbsp;${ic('strongbox',12)}OPEN &nbsp;${ic('backpack',12)}BAG<br>左タッチ：移動 &nbsp;右スワイプ：視点</p>
+        ${upgStr?`<p class="ms-upg">強化済み: ${upgStr}</p>`:''}
+        <div class="ms-btns">
+          ${_mbtn('m-ng','mbtn-pri','🎮 NEW GAME')}
+          ${sv?_mbtn('m-cont','mbtn-sec',`📂 続きから (${sv.diff||'normal'} ${fmtTime(sv.elapsed||0)})`):''}
+          ${hasUpg?_mbtn('m-up','mbtn-blue',ic('house',13)+' セーフハウス ('+ic('gears',12)+'&thinsp;'+stash+')'):''}
+        </div>
+      </div>`;
+    _bind('m-ng',()=>showMenuScreen('mode'));
+    _bind('m-cont',()=>{const d=loadRunData();if(d)loadAndStart(d);});
+    _bind('m-up',showUpgradeModal);
+  }
+
+  // ── MODE SELECT ──
+  function _menuMode(){
+    $oBody.innerHTML=`
+      <div class="ms">
+        ${_mBack('title')}
+        <p class="ms-label">ゲームモード</p>
+        <div class="ms-row">
+          ${_mbtn('m-solo','mbtn-pri','👤 ソロ')}
+          ${_mbtn('m-multi','mbtn-blue','👥 マルチ')}
+        </div>
+      </div>`;
+    _bindBack();
+    _bind('m-solo',()=>showMenuScreen('solo'));
+    _bind('m-multi',()=>showMenuScreen('mp-room'));
+  }
+
+  // ── SOLO SETUP ──
+  function _menuSolo(){
+    const sv=hasSave()?loadRunData():null;
+    $oBody.innerHTML=`
+      <div class="ms">
+        ${_mBack('mode')}
+        <p class="ms-label">難易度</p>
+        <div class="diff-row">
+          ${['easy','normal','hard'].map(d=>`<button class="diff-btn${d===currentDiff?' active':''}" data-d="${d}">
+            ${d==='easy'?'Easy':d==='normal'?ic('shambling-zombie',13)+' Normal':ic('dread-skull',13)+' Hard'}</button>`).join('')}
+        </div>
+        ${sv?`
+        <div class="ms-save-box">
+          <p class="ms-save-info">📂 ${sv.diff||'normal'} &nbsp;${ic('alarm-clock',12)} ${fmtTime(sv.elapsed||0)} &nbsp;${ic('dread-skull',12)} ${sv.kills||0}体</p>
+          <div class="ms-row">
+            ${_mbtn('m-cont','mbtn-sec','📂 続きから')}
+            ${_mbtn('m-new','mbtn-pri','🆕 新規')}
+          </div>
+          ${_mbtn('m-del','mbtn-danger','🗑 セーブ削除')}
+        </div>`:`
+        <div class="ms-btns" style="margin-top:10px">
+          ${_mbtn('m-new','mbtn-pri','▶ ゲーム開始')}
+        </div>`}
+      </div>`;
+    _bindBack();
+    $oBody.querySelectorAll('.diff-btn[data-d]').forEach(b=>{
+      b.addEventListener('click',e=>{e.stopPropagation();currentDiff=b.dataset.d;D=DIFFS[currentDiff];_menuSolo();});
+      b.addEventListener('touchend',e=>{e.preventDefault();e.stopPropagation();currentDiff=b.dataset.d;D=DIFFS[currentDiff];_menuSolo();});
+    });
+    _bind('m-new',startGame);
+    _bind('m-cont',()=>{const d=loadRunData();if(d)loadAndStart(d);});
+    _bind('m-del',()=>{clearRun();_menuSolo();});
+  }
+
+  // ── MP ROOM (name + room code) ──
+  function _menuMpRoom(){
+    const savedName=localStorage.getItem('mpPlayerName')||'';
+    $oBody.innerHTML=`
+      <div class="ms">
+        ${_mBack('mode')}
+        <p class="ms-label">マルチプレイ</p>
+        <div class="ms-form">
+          <input id="mp-name" type="text" maxlength="16" placeholder="プレイヤー名" value="${savedName}" class="ms-input">
+          <div class="ms-row" style="gap:6px">
+            <input id="mp-room-input" type="text" maxlength="8" placeholder="ルームID (例: ABCD)" class="ms-input" style="text-transform:uppercase;flex:1;min-width:0">
+            ${_mbtn('mp-rand','mbtn-small','🎲')}
+          </div>
+          <div class="ms-row">
+            ${_mbtn('mp-create','mbtn-pri','🏠 部屋を作る')}
+            ${_mbtn('mp-join','mbtn-sec','🤝 参加する')}
+          </div>
+          ${mpEnabled?`
+          <div class="ms-connected">
+            接続中: <b style="color:#ffcc44">${mpRoom}</b>
+            ${_mbtn('mp-go-lobby','mbtn-blue','ロビーへ →')}
+          </div>
+          ${_mbtn('mp-leave','mbtn-danger','⛔ 退出')}`:``}
+        </div>
+      </div>`;
+    _bindBack();
+    const ri=document.getElementById('mp-room-input');
+    const ni=document.getElementById('mp-name');
+    document.getElementById('mp-rand')?.addEventListener('click',e=>{e.stopPropagation();_mpRand(ri);});
+    document.getElementById('mp-rand')?.addEventListener('touchend',e=>{e.preventDefault();e.stopPropagation();_mpRand(ri);});
+    const doJoin=()=>{
+      const roomId=(ri?.value||'').trim().toUpperCase();
+      const name=(ni?.value||'').trim()||'Player';
+      if(!roomId){notify('ルームIDを入力してください');return;}
+      localStorage.setItem('mpPlayerName',name);
+      mpConnect(roomId,name);
+      setTimeout(()=>showMenuScreen('mp-lobby'),350);
+    };
+    const doCreate=()=>{
+      let roomId=(ri?.value||'').trim().toUpperCase();
+      if(!roomId){ _mpRand(ri); roomId=ri.value; }
+      const name=(ni?.value||'').trim()||'Player';
+      localStorage.setItem('mpPlayerName',name);
+      mpConnect(roomId,name);
+      setTimeout(()=>showMenuScreen('mp-lobby'),350);
+    };
+    _bind('mp-create',doCreate);
+    _bind('mp-join',doJoin);
+    _bind('mp-go-lobby',()=>showMenuScreen('mp-lobby'));
+    _bind('mp-leave',()=>{mpDisconnect();_menuMpRoom();});
+  }
+  function _mpRand(input){
+    const c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let r=''; for(let i=0;i<4;i++) r+=c[Math.floor(Math.random()*c.length)];
+    if(input) input.value=r;
+  }
+
+  // ── MP LOBBY (player list + host start) ──
+  function _menuMpLobby(){
+    if(!mpEnabled){showMenuScreen('mp-room');return;}
+    const all=[`🎮 あなた${mpHost?' <b style="color:#ffcc44">(ホスト)</b>':' (ゲスト)'}`,...[...mpPlayers.values()].map(p=>`👤 ${p.name}`)];
+    $oBody.innerHTML=`
+      <div class="ms">
+        ${_mBack('mp-room')}
+        <div class="ms-room-hdr">
+          <span class="ms-room-code">ルーム: <b>${mpRoom}</b></span>
+          <span class="ms-room-count">${all.length}人接続中</span>
+        </div>
+        <div class="ms-players">${all.map(n=>`<div class="ms-player">${n}</div>`).join('')}</div>
+        ${mpHost?`
+        <p class="ms-label" style="margin-top:8px">難易度</p>
+        <div class="diff-row">
+          ${['easy','normal','hard'].map(d=>`<button class="diff-btn${d===currentDiff?' active':''}" data-d="${d}">
+            ${d==='easy'?'Easy':d==='normal'?ic('shambling-zombie',13)+' Normal':ic('dread-skull',13)+' Hard'}</button>`).join('')}
+        </div>
+        <div class="ms-btns" style="margin-top:10px">
+          ${_mbtn('mp-start','mbtn-pri','▶ ゲーム開始')}
+        </div>`:`
+        <p class="ms-waiting">ホストがゲームを開始するまでお待ちください</p>
+        <div class="ms-dots"><span>●</span><span>●</span><span>●</span></div>`}
+      </div>`;
+    _bindBack();
+    $oBody.querySelectorAll('.diff-btn[data-d]').forEach(b=>{
+      b.addEventListener('click',e=>{e.stopPropagation();currentDiff=b.dataset.d;D=DIFFS[currentDiff];_menuMpLobby();});
+      b.addEventListener('touchend',e=>{e.preventDefault();e.stopPropagation();currentDiff=b.dataset.d;D=DIFFS[currentDiff];_menuMpLobby();});
+    });
+    _bind('mp-start',mpHostStartGame);
   }
 
   function enterGame(){
@@ -1387,6 +2179,9 @@
     const btnCtxUse=document.getElementById('inv-ctx-use');
     if(btnCtxUse){ addBtnDirect(btnCtxUse,()=>{if(invCtxId!==null)invUse(invCtxId);}); }
 
+    const btnCtxRotate=document.getElementById('inv-ctx-rotate');
+    if(btnCtxRotate){ addBtnDirect(btnCtxRotate,()=>{if(invCtxId!==null)rotateInvItem(invCtxId);}); }
+
     const btnCtxDrop=document.getElementById('inv-ctx-drop');
     if(btnCtxDrop){ addBtnDirect(btnCtxDrop,()=>{if(invCtxId!==null){invDrop(invCtxId);invCtxId=null;const ctx=document.getElementById('inv-ctx');if(ctx)ctx.style.display='none';}}); }
 
@@ -1408,9 +2203,8 @@
   }
 
   function handleOBtn(){
-    if(overlayAction==='start') startGame();
-    else if(overlayAction==='respawn') { clearTimeout(respawnTO); doRespawn(); }
-    else showStart();
+    if(overlayAction==='respawn') { clearTimeout(respawnTO); doRespawn(); }
+    else showMenuScreen('title');
   }
   function onMM(e){ if(state!=='playing')return; cameraAngle-=e.movementX*0.0028; }
 
@@ -1462,13 +2256,14 @@
     meleeCD=player.melee.cd;
     SFX.melee();
 
-    swingTimer=0.22;
+    swingTimer=0.45;
     addSwingArc();
 
     const baseDmg=eff.meleeDmg(player.melee.dmg);
     let hit=false;
     for(let i=zombies.length-1;i>=0;i--){
       const z=zombies[i];
+      if(z.dying)continue;
       const d=dist2(player.x,player.z,z.x,z.z);
       if(d>player.melee.range)continue;
       // player.angle 0 → faces -Z; atan2(dx,dz)=π for zombie at -Z → compare against angle+π
@@ -1477,16 +2272,48 @@
       z.hp-=baseDmg; z.flashTimer=0.18; hit=true;
       if(z.hp<=0)killZombie(i);
     }
-    if(hit) setTimeout(()=>SFX.hit(),40);
+    if(hit){ setTimeout(()=>SFX.hit(),40); triggerShake(0.12); }
+    else {
+      // Check if any zombie is near but out of arc — give direction hint
+      const anyNear=zombies.some(z=>!z.dying&&dist2(player.x,player.z,z.x,z.z)<player.melee.range*2);
+      if(anyNear) notify('空振り！向いている方向を攻撃します');
+    }
     updateHUD(true);
+  }
+
+  function triggerShake(mag=0.12){ shakeTimer=0.20; shakeMag=mag; }
+
+  const _bloodPools=[];
+  function spawnBloodPool(x,z){
+    const r=0.4+Math.random()*0.7;
+    const g=new THREE.CircleGeometry(r,8);
+    const m=new THREE.MeshStandardMaterial({
+      color:0x880000,transparent:true,
+      opacity:0.7+Math.random()*0.2,roughness:1,depthWrite:false
+    });
+    const pool=new THREE.Mesh(g,m);
+    pool.rotation.x=-Math.PI/2;
+    pool.position.set(x,0.012,z);
+    scene.add(pool);
+    _bloodPools.push(pool);
+    // Keep at most 40 pools to avoid memory growth
+    if(_bloodPools.length>40){
+      const old=_bloodPools.shift();
+      scene.remove(old); old.geometry.dispose(); old.material.dispose();
+    }
   }
 
   function addSwingArc(){
     if(swingMesh){scene.remove(swingMesh);swingMesh=null;}
     const mat=new THREE.MeshBasicMaterial({color:0xffdd66,transparent:true,opacity:0.5,side:THREE.DoubleSide,depthWrite:false});
     const geo=new THREE.CircleGeometry(player.melee.range,8,Math.PI/2-player.melee.arc/2,player.melee.arc);
+    // Bake Rx(-π/2) into geometry buffer so the arc lies flat in XZ plane
+    // with its center bisector pointing toward local -Z (world -Z at angle 0).
+    // Then setting only rotation.y=player.angle on the mesh correctly rotates
+    // the center to face (-sin(pa), 0, -cos(pa)) = player's facing direction.
+    geo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI/2));
     swingMesh=new THREE.Mesh(geo,mat);
-    swingMesh.rotation.x=-Math.PI/2;
+    // NO rotation.x here — it's already baked into geo
     swingMesh.position.y=0.05;
     scene.add(swingMesh);
   }
@@ -1553,11 +2380,21 @@
   }
 
   function killZombie(idx){
-    scene.remove(zombies[idx].mesh); zombies.splice(idx,1);
+    const z=zombies[idx];
+    if(z.dying)return; // already dying
+    // Blood pool at death position
+    spawnBloodPool(z.x,z.z);
+    // Broadcast kill to other players
+    if(mpEnabled && mpSock) mpSock.emit('zombieKill', { zombieId:z.id });
+    // Start death animation instead of instant removal
+    z.dying=true; z.dyingTimer=0.8;
+    // Pre-enable transparency on all sub-meshes so opacity fades work
+    z.mesh.traverse(c=>{ if(c.isMesh&&c.material){ c.material.transparent=true; } });
     killCount++;
     SFX.die();
-    if(zombies.length>0&&Math.random()<0.4) setTimeout(()=>SFX.zombie(),200+Math.random()*300);
-    notify(zombies.length===0?'🎉 全ゾンビ撃破！出口を目指せ！':`ゾンビを倒した！(${killCount}体)`);
+    const aliveCount=zombies.filter(zz=>!zz.dying).length; // z.dying already set above
+    if(aliveCount>0&&Math.random()<0.4) setTimeout(()=>SFX.zombie(),200+Math.random()*300);
+    notify(aliveCount<=0?`${ic('exit-door',14)} 全ゾンビ撃破！出口を目指せ！`:`${ic('dread-skull',14)} ゾンビを倒した！(${killCount}体)`);
   }
 
   // ================================================================
@@ -1581,31 +2418,32 @@
     document.getElementById('btn-interact').style.display='none';
 
     const loot=rollCrate(c.type);
-    if(loot.length===0){ SFX.open(); notify('📦 空だった…'); return; }
+    if(loot.length===0){ SFX.open(); notify(ic('strongbox',14)+' 空だった…'); return; }
 
     const label=c.type==='locker'?'ロッカー':'箱';
 
     // Initial rummage sound + "searching..." message
     SFX.rummage();
-    notify(`🔍 ${label}を漁っている…`);
+    notify(`${ic('strongbox',14)} ${label}を漁っている…`);
 
     // Item timing:
-    //   items 0..(n-2): appear every 1 s  →  delay = (idx+1)*1000 ms
-    //   item  (n-1)   : last item, 3 s after the previous one
+    //   items 0..(n-2): appear every 0.7 s  →  delay = (idx+1)*700 ms
+    //   item  (n-1)   : last item, 1.2 s after the previous one
     loot.forEach((itm,idx)=>{
       const isLast=idx===loot.length-1;
-      const delay=isLast ? idx*1000+3000 : (idx+1)*1000;
+      const delay=isLast ? idx*700+1200 : (idx+1)*700;
 
       // Play an extra rummage just before each item drops
-      const rumbleAt=Math.max(0,delay-600);
+      const rumbleAt=Math.max(0,delay-400);
       setTimeout(()=>{if(state==='playing')SFX.rummage();},rumbleAt);
 
       setTimeout(()=>{
         if(state!=='playing')return;
-        const ox=(Math.random()-0.5)*CELL*0.55,oz=(Math.random()-0.5)*CELL*0.55;
-        createItem(itm.type,itm.sub,itm.amount||0,itm.ammo||0,c.x+ox,c.z+oz);
+        // Spawn near current player position (not container) so item is always within PICKUP_R
+        const ox=(Math.random()-0.5)*1.0,oz=(Math.random()-0.5)*1.0;
+        createItem(itm.type,itm.sub,itm.amount||0,itm.ammo||0,player.x+ox,player.z+oz);
         SFX.itemFound();
-        const icon=ITEM_ICONS[itm.sub]||'📦';
+        const icon=ITEM_ICONS[itm.sub]||ic('strongbox');
         const name=ITEM_NAMES[itm.sub]||itm.sub;
         const amtStr=itm.type==='gun'?` (${itm.ammo}発)`:itm.amount>1?` ×${itm.amount}`:'';
         notify(`${icon} ${name}${amtStr}が出てきた！${isLast?'（完了）':''}`);
@@ -1623,7 +2461,7 @@
         padding:10px 28px;border:2px solid rgba(0,180,255,0.6);border-radius:30px;
         background:rgba(0,60,120,0.6);color:#88ddff;font-size:14px;font-weight:bold;
         cursor:pointer;-webkit-tap-highlight-color:transparent;">
-        🏠 セーフハウス アップグレード (🔧 ${pc})
+        ${ic('house',14)} セーフハウス アップグレード (${ic('gears',12)} ${pc})
       </button></div>`;
   }
 
@@ -1641,8 +2479,7 @@
   }
   function closeUpgradeModal(){
     $upgradeModal.style.display='none';
-    // Refresh start screen so parts count / upgrade list stay in sync
-    if(state==='start') showStart();
+    if(state==='start') _menuTitle(); // re-render title with updated parts count
   }
 
   function renderUpgradeModal(){
@@ -1664,7 +2501,7 @@
           </div>
         </div>
         <button class="upg-btn${canBuy?'':' disabled'}" data-id="${u.id}">
-          ${maxed?'MAX':'🔧 '+u.cost+'個'}
+          ${maxed?'MAX':ic('gears',12)+' '+u.cost+'個'}
         </button>`;
       list.appendChild(div);
     });
@@ -1690,7 +2527,7 @@
     upgrades[id]=(upgrades[id]||0)+1;
     saveUpgrades();
     SFX.upgrade();
-    notify(`🏠 ${u.name} Lv${upgrades[id]}にアップグレード！`);
+    notify(ic('house',14)+` ${u.name} Lv${upgrades[id]}にアップグレード！`);
     if(id==='hpUp')   player.hp=Math.min(eff.hpMax(),player.hp+20);
     if(id==='stUp')   player.stamina=Math.min(eff.stMax(),player.stamina+15);
     renderUpgradeModal();
@@ -1717,11 +2554,11 @@
     if(swingTimer>0){
       swingTimer-=dt;
       if(swingMesh){
-        const prog=swingTimer/0.22;
+        const prog=swingTimer/0.45;
         swingMesh.material.opacity=0.5*prog;
         const sinA=Math.sin(player.angle),cosA=Math.cos(player.angle);
         swingMesh.position.set(player.x-sinA*0.5,0.05,player.z-cosA*0.5);
-        swingMesh.rotation.y=-player.angle;
+        swingMesh.rotation.y=player.angle;
       }
       if(swingTimer<=0&&swingMesh){scene.remove(swingMesh);swingMesh=null;}
     }
@@ -1757,20 +2594,24 @@
         const sinC=Math.sin(cameraAngle), cosC=Math.cos(cameraAngle);
         const wx=-sinC*nf+cosC*ns;
         const wz=-cosC*nf-sinC*ns;
-        const targetAngle=Math.atan2(-wx,-wz);
-        const diff=angleDiff(targetAngle,player.angle);
-        player.angle+=Math.sign(diff)*Math.min(Math.abs(diff),12*dt);
+        player.angle=Math.atan2(-wx,-wz);
         const spd=(sprinting&&!player.exhausted)?eff.sprintSpd():eff.walkSpd();
+        lastMoveSpd=spd;
         tryMove(player,wx*spd*dt,wz*spd*dt,PLAYER_R);
+      } else {
+        // Standing still → face camera forward so attack always hits what you see
+        player.angle=cameraAngle;
+        lastMoveSpd=0;
       }
     } else {
       for(const k in keys)prevKeys[k]=keys[k];
+      lastMoveSpd=0; // inventory open → not moving
     }
 
     // Player mesh
     const tiltX = swingTimer>0 ? Math.sin(swingTimer*Math.PI/0.22)*0.35 : 0;
     player.mesh.position.set(player.x,0,player.z);
-    player.mesh.rotation.set(tiltX,player.angle,0,'YXZ');
+    player.mesh.rotation.set(-tiltX,player.angle,0,'YXZ');
 
     const pl=scene.getObjectByName('pLight'); if(pl)pl.position.set(player.x,2.2,player.z);
 
@@ -1780,6 +2621,26 @@
     camera.position.y+=(CAM_H-camera.position.y)*CAM_LERP;
     camera.position.z+=(player.z+cosC*CAM_DIST-camera.position.z)*CAM_LERP;
     camera.lookAt(player.x,1.1,player.z);
+
+    // ── Camera bob (footstep sway) ──
+    if(lastMoveSpd>0.1) bobPhase+=dt*(sprinting?12:7);
+    const bobAmt=lastMoveSpd>0.1?(sprinting?0.055:0.030):0;
+    camera.position.y+=Math.sin(bobPhase)*bobAmt;
+
+    // ── Screen shake ──
+    if(shakeTimer>0){
+      shakeTimer-=dt;
+      camera.position.x+=(Math.random()-0.5)*shakeMag;
+      camera.position.y+=(Math.random()-0.5)*shakeMag*0.5;
+      camera.position.z+=(Math.random()-0.5)*shakeMag;
+    }
+
+    // ── Emergency light flicker ──
+    if(emgLight){
+      flickerT+=dt;
+      emgLight.intensity=0.35+0.25*Math.sin(flickerT*17.3)*Math.sin(flickerT*5.1);
+      if(Math.random()<0.005)emgLight.intensity=0;
+    }
 
     // Exit
     if(dist2(player.x,player.z,exitPos.x,exitPos.z)<EXIT_R){winGame();return;}
@@ -1850,6 +2711,7 @@
       let removed=false;
       for(let zi=zombies.length-1;zi>=0;zi--){
         const z=zombies[zi];
+        if(z.dying)continue;
         if(dist2(b.x,b.z,z.x,z.z)<0.72){
           z.hp-=b.dmg; z.flashTimer=0.22;
           SFX.hit();
@@ -1872,6 +2734,16 @@
     for(let i=zombies.length-1;i>=0;i--){
       const z=zombies[i];
 
+      // ── Death animation ──
+      if(z.dying){
+        z.dyingTimer-=dt;
+        const prog=Math.max(0,z.dyingTimer/0.8);
+        z.mesh.rotation.z=(1-prog)*Math.PI*0.5; // topple sideways
+        z.mesh.traverse(c=>{ if(c.isMesh&&c.material)c.material.opacity=prog; });
+        if(z.dyingTimer<=0){ scene.remove(z.mesh); zombies.splice(i,1); }
+        continue;
+      }
+
       if(z.flashTimer>0){
         z.flashTimer-=dt;
         const flashOn=z.flashTimer>0;
@@ -1886,8 +2758,11 @@
 
       const dx=player.x-z.x,dz=player.z-z.z,d=Math.sqrt(dx*dx+dz*dz)||0.001;
       if(d<D.zDet){
-        const spd=d<5?D.zRun:D.zSpd;
-        tryMove(z,(dx/d)*spd*dt,(dz/d)*spd*dt,ZOMBIE_R);
+        // Stop pushing when already in contact (prevents position jitter at d≈0)
+        if(d>PLAYER_R+ZOMBIE_R){
+          const spd=d<5?D.zRun:D.zSpd;
+          tryMove(z,(dx/d)*spd*dt,(dz/d)*spd*dt,ZOMBIE_R);
+        }
         z.angle=Math.atan2(dx,dz);
       } else {
         z.wTimer-=dt;
@@ -1911,7 +2786,7 @@
         if(now-z.lastDmg>450){
           z.lastDmg=now;
           z.attackAnim=0.25;
-          flashDamage(); SFX.hit();
+          flashDamage(); SFX.hit(); triggerShake(0.18);
           if(Math.random()<0.5)SFX.zombie();
         }
       }
@@ -1924,6 +2799,13 @@
     if(saveTimer<=0){saveTimer=5;saveRun();}
 
     if(player.hp<=0)gameOver();
+
+    // ── Multiplayer tick ──
+    if(mpEnabled){
+      _mpMoveT+=dt;
+      if(_mpMoveT>=0.05){ _mpMoveT=0; _mpSendMove(); }
+      _mpTickPlayers(dt);
+    }
   }
 
   // ================================================================
@@ -1948,22 +2830,35 @@
     if(player.exhausted&&!exhaustedNotified){notify('スタミナ切れ！');exhaustedNotified=true;}
     if(!player.exhausted)exhaustedNotified=false;
 
-    $weaponInfo.textContent=`⚔ ${player.melee.name}`;
+    $weaponInfo.innerHTML=`${ic('crossed-swords',14)} ${player.melee.name}`;
     if(player.gun){
       const g=GUNS[player.gun.id];
-      $gunInfo.textContent=`🔫 ${g.name} ${player.gun.ammo}/${g.maxAmmo}`;
+      const gIco=player.gun.id==='shotgun'?ic('sawed-off-shotgun',14):ic('revolver',14);
+      $gunInfo.innerHTML=`${gIco} ${g.name} ${player.gun.ammo}/${g.maxAmmo}`;
       $gunInfo.style.color=player.gun.ammo>0?'#ffdd88':'#ff4444'; $gunInfo.className='';
-    } else { $gunInfo.textContent='🔫 なし'; $gunInfo.style.color=''; $gunInfo.className='dim'; }
+    } else { $gunInfo.innerHTML=`${ic('revolver',14)} なし`; $gunInfo.style.color=''; $gunInfo.className='dim'; }
 
     const healCnt=invCountType('heal');
-    $healCount.textContent=`💊 ×${healCnt}`;
+    $healCount.innerHTML=`${ic('first-aid-kit',14)} ×${healCnt}`;
     $healCount.className=healCnt>0?'':'dim';
 
     const partsCnt=invCountType('parts');
     if($partsNum){$partsNum.textContent=partsCnt; document.getElementById('parts-row').style.display=partsCnt>0?'inline':'none';}
 
     const d=dist2(player.x,player.z,exitPos.x,exitPos.z);
-    $exitHint.textContent=d<20?'🟢 出口が近い！':`🟢 出口まで約${Math.round(d)}m`;
+    let exitLabel;
+    if(d<EXIT_R*1.5){exitLabel='出口に到達！';}
+    else if(d<20){exitLabel='出口が近い！';}
+    else{
+      // Compute arrow pointing toward exit relative to camera forward direction
+      const angToExit=Math.atan2(exitPos.x-player.x,exitPos.z-player.z);
+      let rel=angToExit-(cameraAngle+Math.PI);
+      while(rel>Math.PI)rel-=Math.PI*2; while(rel<-Math.PI)rel+=Math.PI*2;
+      const arrowDir=['↑','↗','→','↘','↓','↙','←','↖'];
+      const ai=(((Math.round(rel/(Math.PI/4))%8)+8)%8);
+      exitLabel=arrowDir[ai]+` 出口まで約${Math.round(d)}m`;
+    }
+    $exitHint.innerHTML=`${ic('exit-door',13)} ${exitLabel}`;
 
     document.getElementById('btn-attack').style.opacity=player.exhausted?'0.4':'1';
     document.getElementById('btn-fire').style.opacity=(player.gun&&player.gun.ammo>0)?'1':'0.35';
@@ -1979,7 +2874,7 @@
   const notifQueue=[];
   let notifTO=null;
   function notify(txt){
-    $pickupNotif.textContent=txt;
+    $pickupNotif.innerHTML=txt;
     $pickupNotif.style.opacity='1';
     $pickupNotif.classList.add('show');
     clearTimeout(notifTO);
@@ -1991,14 +2886,15 @@
   // ================================================================
   function winGame(){
     state='win'; SFX.win();
+    if(mpEnabled && mpSock) mpSock.emit('gameWon');
     savePartsStash(invCountType('parts'));
     clearRun();
     showResult('🎉 脱出成功！',`
       ゾンビから逃げ切った！<br>
       <span style="font-size:13px;color:#aaa">
-        🕐 <b style="color:#fff">${fmtTime(gameElapsed)}</b> &ensp;
-        💀 <b style="color:#fff">${killCount}体</b> &ensp;
-        ❤ <b style="color:#ff4">${Math.ceil(player.hp)}</b>
+        ${ic('alarm-clock',13)} <b style="color:#fff">${fmtTime(gameElapsed)}</b> &ensp;
+        ${ic('dread-skull',13)} <b style="color:#fff">${killCount}体</b> &ensp;
+        ${ic('heart-plus',13)} <b style="color:#ff4">${Math.ceil(player.hp)}</b>
       </span>
       ${upgradeButtonHtml()}
       <div style="margin-top:8px">
@@ -2015,8 +2911,8 @@
     setTimeout(()=>{
       const bng=document.getElementById('btn-win-newgame');
       if(bng){
-        bng.addEventListener('click',()=>showStart());
-        bng.addEventListener('touchend',e=>{e.preventDefault();showStart();});
+        bng.addEventListener('click',()=>showMenuScreen('title'));
+        bng.addEventListener('touchend',e=>{e.preventDefault();showMenuScreen('title');});
       }
     },0);
   }
@@ -2026,11 +2922,11 @@
     state='respawning'; SFX.gameover();
     saveRun();
 
-    $oTitle.textContent='💀 やられた...';
+    $oTitle.innerHTML=`${ic('dread-skull',24)} やられた...`;
     $oBody.innerHTML=`
       <p style="color:#ff4444;font-size:15px;font-weight:bold">全アイテムロスト（資材は持越し）</p>
       <p style="font-size:13px;color:#aaa;margin-top:10px">
-        🕐 ${fmtTime(gameElapsed)} &nbsp;💀 ${killCount}体撃破
+        ${ic('alarm-clock',13)} ${fmtTime(gameElapsed)} &nbsp;${ic('dread-skull',13)} ${killCount}体撃破
       </p>
       ${upgradeButtonHtml()}
       <p style="font-size:12px;color:#777;margin-top:10px">セーフハウスに戻ります...</p>`;
@@ -2081,7 +2977,7 @@
 
     state='playing';
     updateHUD(true);
-    notify('🏠 セーフハウスに帰還。アイテムロスト（資材は持越し）');
+    notify(ic('house',14)+' セーフハウスに帰還。アイテムロスト（資材は持越し）');
     saveRun();
   }
 
